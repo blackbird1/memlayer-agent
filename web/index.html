@@ -20,13 +20,6 @@
             display: flex;
             flex-direction: column;
         }
-        .header-controls {
-            padding: 20px;
-            border-bottom: 1px solid #eee;
-            display: flex;
-            gap: 10px;
-            align-items: center;
-        }
         .messages {
             flex: 1;
             overflow-y: auto;
@@ -130,17 +123,11 @@
         button:disabled {
             background-color: #ccc;
         }
-        #tokenInput {
-            flex: 0 0 300px;
-        }
     </style>
 </head>
 <body>
     <h1>ADK Interview Chat</h1>
     <div class="chat-container">
-        <div class="header-controls">
-            <input type="password" id="tokenInput" placeholder="Optional: Override MCP Bearer Token">
-        </div>
         <div class="messages" id="messages"></div>
         <div class="input-area">
             <input type="text" id="userInput" placeholder="Type your message..." onkeypress="handleKeyPress(event)">
@@ -151,36 +138,6 @@
     <script>
         const sessionId = "session-" + Math.random().toString(36).substr(2, 9);
         const API_URL = "/api/chat";
-
-        // Load token from cookie on startup
-        window.onload = () => {
-            const token = getCookie("mcp_bearer");
-            if (token) {
-                document.getElementById('tokenInput').value = token;
-            }
-        };
-
-        // Save token when input changes
-        document.getElementById('tokenInput').addEventListener('input', (e) => {
-            setCookie("mcp_bearer", e.target.value.trim(), 30);
-        });
-
-        function setCookie(name, value, days) {
-            const expires = new Date();
-            expires.setTime(expires.getTime() + (days * 24 * 60 * 60 * 1000));
-            document.cookie = `${name}=${value};expires=${expires.toUTCString()};path=/;SameSite=Strict`;
-        }
-
-        function getCookie(name) {
-            const nameEQ = name + "=";
-            const ca = document.cookie.split(';');
-            for (let i = 0; i < ca.length; i++) {
-                let c = ca[i];
-                while (c.charAt(0) === ' ') c = c.substring(1, c.length);
-                if (c.indexOf(nameEQ) === 0) return c.substring(nameEQ.length, c.length);
-            }
-            return null;
-        }
 
         function appendMessage(text, isUser, isLoading = false) {
             const messagesDiv = document.getElementById('messages');
@@ -244,9 +201,7 @@
         async function sendMessage() {
             const input = document.getElementById('userInput');
             const button = document.getElementById('sendButton');
-            const tokenInput = document.getElementById('tokenInput');
             const text = input.value.trim();
-            const token = tokenInput.value.trim();
 
             if (!text) return;
 
@@ -257,18 +212,12 @@
 
             const loadingMsg = appendMessage('...', false, true);
 
-            const headers = {
-                'Content-Type': 'application/json',
-            };
-
-            if (token) {
-                headers['Authorization'] = `Bearer ${token}`;
-            }
-
             try {
                 const response = await fetch(API_URL, {
                     method: 'POST',
-                    headers: headers,
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
                     body: JSON.stringify({
                         message: text,
                         sessionId: sessionId

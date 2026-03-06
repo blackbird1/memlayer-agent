@@ -1,0 +1,39 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: adk-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  adk-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.adk-server
+    container_name: adk-server
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REDIS_ADDR: redis:6379
+    ports:
+      - "9090:9090"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  adk-web:
+    build:
+      context: .
+      dockerfile: Dockerfile.adk-web
+    container_name: adk-web
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      - adk-server

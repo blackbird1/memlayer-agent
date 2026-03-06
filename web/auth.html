@@ -131,7 +131,7 @@
         .status.error { color: #dc3545; }
         .status.success { color: #28a745; }
         
-        .mcp-info {
+        .redirect-info {
             font-size: 12px;
             color: #888;
             margin-top: 20px;
@@ -177,8 +177,8 @@
             <button id="goChatBtn" class="btn btn-outline" onclick="goToChat()">Open Web Chat</button>
         </div>
 
-        <div id="mcpInfo" class="mcp-info" style="display: none;">
-            Detected MCP login request. You will be redirected back to your IDE automatically.
+        <div id="redirectInfo" class="redirect-info" style="display: none;">
+            Detected IDE login request. You will be redirected back to your app automatically.
         </div>
     </div>
 
@@ -194,7 +194,7 @@
             const token = urlParams.get('token') || hashParams.get('access_token');
             
             if (redirectUri) {
-                document.getElementById('mcpInfo').style.display = 'block';
+                document.getElementById('redirectInfo').style.display = 'block';
             }
 
             if (token) {
@@ -288,10 +288,7 @@
             document.getElementById('copyBtn').style.display = 'block';
             document.getElementById('goChatBtn').style.display = 'block';
             
-            // Store locally for web usage
-            setCookie("mcp_bearer", token, 30);
-
-            // Handle Redirects (MCP / IDE)
+            // Handle redirects back to the app/IDE.
             if (redirectUri) {
                 document.getElementById('redirectBtn').style.display = 'block';
                 performAutoRedirect(token);
@@ -307,7 +304,7 @@
                 target.searchParams.set('token', token);
                 if (state) target.searchParams.set('state', state);
                 
-                // For deep links (mcp://, vscode://), some browsers might block auto-redirects
+                // For deep links (e.g., vscode://), some browsers might block auto-redirects
                 // without user interaction, so we show the "Return to App" button just in case.
                 setTimeout(() => {
                     window.location.href = target.toString();
