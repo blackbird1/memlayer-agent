@@ -56,6 +56,34 @@ type jiraSearchIssuesResult struct {
 	Issues []jiraIssueSummary `json:"issues"`
 }
 
+type jiraCreateIssueResult struct {
+	Key      string `json:"key"`
+	ID       string `json:"id"`
+	Self     string `json:"self"`
+	IssueURL string `json:"issue_url,omitempty"`
+}
+
+type jiraProject struct {
+	ID             string `json:"id"`
+	Key            string `json:"key"`
+	Name           string `json:"name"`
+	ProjectTypeKey string `json:"projectTypeKey"`
+	Simplified     bool   `json:"simplified"`
+	Self           string `json:"self,omitempty"`
+	ProjectURL     string `json:"project_url,omitempty"`
+}
+
+type jiraProjectSearchResponse struct {
+	Values []jiraProject `json:"values"`
+	Total  int           `json:"total"`
+}
+
+type jiraListProjectsResult struct {
+	Total    int           `json:"total"`
+	Count    int           `json:"count"`
+	Projects []jiraProject `json:"projects"`
+}
+
 type githubRepoRef struct {
 	Name string `json:"name"`
 }

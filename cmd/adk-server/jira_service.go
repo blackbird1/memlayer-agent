@@ -133,6 +133,122 @@ func (s *JiraService) GetIssue(ctx context.Context, issueKey string) (map[string
 	return payload, nil
 }
 
+func (s *JiraService) CreateIssue(
+	ctx context.Context,
+	projectKey string,
+	summary string,
+	description string,
+	issueType string,
+	assigneeID string,
+	priorityName string,
+) (jiraCreateIssueResult, error) {
+	if err := s.ensureConfigured(); err != nil {
+		s.logger.Error("Jira service not configured", "method", "CreateIssue", "error", err)
+		return jiraCreateIssueResult{}, err
+	}
+	s.logger.Info("Jira API call", "method", "CreateIssue", "project_key", projectKey, "issue_type", issueType)
+
+	fields := map[string]any{
+		"project": map[string]any{
+			"key": projectKey,
+		},
+		"summary": summary,
+		"issuetype": map[string]any{
+			"name": issueType,
+		},
+	}
+
+	if strings.TrimSpace(description) != "" {
+		fields["description"] = map[string]any{
+			"type":    "doc",
+			"version": 1,
+			"content": []map[string]any{
+				{
+					"type": "paragraph",
+					"content": []map[string]any{
+						{
+							"type": "text",
+							"text": description,
+						},
+					},
+				},
+			},
+		}
+	}
+	if strings.TrimSpace(assigneeID) != "" {
+		fields["assignee"] = map[string]any{
+			"accountId": assigneeID,
+		}
+	}
+	if strings.TrimSpace(priorityName) != "" {
+		fields["priority"] = map[string]any{
+			"name": priorityName,
+		}
+	}
+
+	endpoint := s.baseURL + defaultJiraAPIPath + "/issue"
+	body, err := doJSONRequest(ctx, s.httpClient, http.MethodPost, endpoint, map[string]any{
+		"fields": fields,
+	}, map[string]string{
+		"Authorization": s.authHeader,
+		"Accept":        "application/json",
+	})
+	if err != nil {
+		return jiraCreateIssueResult{}, err
+	}
+
+	var created jiraCreateIssueResult
+	if err := json.Unmarshal(body, &created); err != nil {
+		return jiraCreateIssueResult{}, fmt.Errorf("decode Jira create issue response: %w", err)
+	}
+	if strings.TrimSpace(created.Key) != "" {
+		created.IssueURL = strings.TrimRight(s.baseURL, "/") + "/browse/" + created.Key
+	}
+	s.logger.Info("Jira API result", "method", "CreateIssue", "key", created.Key, "id", created.ID)
+	return created, nil
+}
+
+func (s *JiraService) ListProjects(ctx context.Context, maxResults int) (jiraListProjectsResult, error) {
+	if err := s.ensureConfigured(); err != nil {
+		s.logger.Error("Jira service not configured", "method", "ListProjects", "error", err)
+		return jiraListProjectsResult{}, err
+	}
+	s.logger.Info("Jira API call", "method", "ListProjects", "max_results", maxResults)
+
+	q := url.Values{}
+	q.Set("maxResults", strconv.Itoa(maxResults))
+	endpoint := s.baseURL + defaultJiraAPIPath + "/project/search?" + q.Encode()
+
+	body, err := doJSONRequest(ctx, s.httpClient, http.MethodGet, endpoint, nil, map[string]string{
+		"Authorization": s.authHeader,
+		"Accept":        "application/json",
+	})
+	if err != nil {
+		return jiraListProjectsResult{}, err
+	}
+
+	var payload jiraProjectSearchResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return jiraListProjectsResult{}, fmt.Errorf("decode Jira project search response: %w", err)
+	}
+
+	projects := make([]jiraProject, 0, len(payload.Values))
+	for _, item := range payload.Values {
+		if strings.TrimSpace(item.Key) != "" {
+			item.ProjectURL = strings.TrimRight(s.baseURL, "/") + "/browse/" + item.Key
+		}
+		projects = append(projects, item)
+	}
+
+	result := jiraListProjectsResult{
+		Total:    payload.Total,
+		Count:    len(projects),
+		Projects: projects,
+	}
+	s.logger.Info("Jira API result", "method", "ListProjects", "count", result.Count, "total", result.Total)
+	return result, nil
+}
+
 func (s *JiraService) search(ctx context.Context, jql string, maxResults int) (jiraSearchResponse, error) {
 	q := url.Values{}
 	q.Set("jql", jql)

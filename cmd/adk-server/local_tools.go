@@ -22,6 +22,8 @@ type localTools struct {
 func listLocalToolNames() []string {
 	return []string{
 		"jira_get_assigned_issues",
+		"jira_create_issue",
+		"jira_list_projects",
 		"github_get_recent_commits",
 		"github_get_active_pull_requests",
 		"github_list_recent_contributed_repositories",
@@ -50,6 +52,25 @@ func buildLocalToolset() ([]*genai.FunctionDeclaration, map[string]ToolExecutor)
 				"max_results":         schemaInteger("Maximum number of issues to return (1-100). Defaults to 20."),
 				"updated_within_days": schemaInteger("Optional filter to only include issues updated in the last N days."),
 			}, []string{"assignee"}),
+		},
+		{
+			Name:        "jira_create_issue",
+			Description: "Create a Jira issue in a project.",
+			Parameters: schemaObject(map[string]*genai.Schema{
+				"project_key":   schemaString("Jira project key, e.g. ENG."),
+				"summary":       schemaString("Issue summary/title."),
+				"description":   schemaString("Issue description in plain text."),
+				"issue_type":    schemaString("Issue type name, e.g. Task, Bug, Story. Defaults to Task."),
+				"assignee_id":   schemaString("Optional Jira accountId to assign issue to."),
+				"priority_name": schemaString("Optional priority name, e.g. High."),
+			}, []string{"project_key", "summary"}),
+		},
+		{
+			Name:        "jira_list_projects",
+			Description: "List Jira projects visible to the configured Jira account.",
+			Parameters: schemaObject(map[string]*genai.Schema{
+				"max_results": schemaInteger("Maximum number of projects to return (1-200). Defaults to 50."),
+			}, nil),
 		},
 		{
 			Name:        "github_get_recent_commits",
@@ -115,6 +136,8 @@ func buildLocalToolset() ([]*genai.FunctionDeclaration, map[string]ToolExecutor)
 
 	executors := map[string]ToolExecutor{
 		"jira_get_assigned_issues":                    toolset.jiraGetAssignedIssues,
+		"jira_create_issue":                           toolset.jiraCreateIssue,
+		"jira_list_projects":                          toolset.jiraListProjects,
 		"github_get_recent_commits":                   toolset.githubGetRecentCommits,
 		"github_get_active_pull_requests":             toolset.githubGetActivePullRequests,
 		"github_list_recent_contributed_repositories": toolset.githubListRecentContributedRepositories,
@@ -148,6 +171,58 @@ func (t *localTools) jiraGetAssignedIssues(ctx context.Context, args map[string]
 		return "", err
 	}
 	t.logger.Info("Tool execution finished", "tool", "jira_get_assigned_issues", "assignee", assignee, "count", result.Count)
+	return marshalJSON(result)
+}
+
+func (t *localTools) jiraCreateIssue(ctx context.Context, args map[string]any) (string, error) {
+	projectKey, err := getRequiredStringArg(args, "project_key")
+	if err != nil {
+		return "", err
+	}
+	summary, err := getRequiredStringArg(args, "summary")
+	if err != nil {
+		return "", err
+	}
+	description, err := getOptionalStringArg(args, "description", "")
+	if err != nil {
+		return "", err
+	}
+	issueType, err := getOptionalStringArg(args, "issue_type", "Task")
+	if err != nil {
+		return "", err
+	}
+	assigneeID, err := getOptionalStringArg(args, "assignee_id", "")
+	if err != nil {
+		return "", err
+	}
+	priorityName, err := getOptionalStringArg(args, "priority_name", "")
+	if err != nil {
+		return "", err
+	}
+
+	t.logger.Info("Tool execution started", "tool", "jira_create_issue", "project_key", projectKey, "issue_type", issueType)
+	result, err := t.jira.CreateIssue(ctx, projectKey, summary, description, issueType, assigneeID, priorityName)
+	if err != nil {
+		t.logger.Error("Tool execution failed", "tool", "jira_create_issue", "project_key", projectKey, "error", err)
+		return "", err
+	}
+	t.logger.Info("Tool execution finished", "tool", "jira_create_issue", "project_key", projectKey, "key", result.Key)
+	return marshalJSON(result)
+}
+
+func (t *localTools) jiraListProjects(ctx context.Context, args map[string]any) (string, error) {
+	maxResults, err := getOptionalIntArg(args, "max_results", 50, 1, 200)
+	if err != nil {
+		return "", err
+	}
+
+	t.logger.Info("Tool execution started", "tool", "jira_list_projects", "max_results", maxResults)
+	result, err := t.jira.ListProjects(ctx, maxResults)
+	if err != nil {
+		t.logger.Error("Tool execution failed", "tool", "jira_list_projects", "max_results", maxResults, "error", err)
+		return "", err
+	}
+	t.logger.Info("Tool execution finished", "tool", "jira_list_projects", "count", result.Count)
 	return marshalJSON(result)
 }
 
