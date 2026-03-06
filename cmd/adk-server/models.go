@@ -63,6 +63,13 @@ type jiraCreateIssueResult struct {
 	IssueURL string `json:"issue_url,omitempty"`
 }
 
+type jiraAssignIssueResult struct {
+	IssueKey   string `json:"issue_key"`
+	AssigneeID string `json:"assignee_id"`
+	IssueURL   string `json:"issue_url,omitempty"`
+	Assigned   bool   `json:"assigned"`
+}
+
 type jiraProject struct {
 	ID             string `json:"id"`
 	Key            string `json:"key"`
@@ -82,6 +89,47 @@ type jiraListProjectsResult struct {
 	Total    int           `json:"total"`
 	Count    int           `json:"count"`
 	Projects []jiraProject `json:"projects"`
+}
+
+type jiraValidationAccount struct {
+	AccountID   string `json:"account_id,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	Email       string `json:"email,omitempty"`
+}
+
+type jiraValidationPermissions struct {
+	BrowseProjects bool `json:"browse_projects"`
+	CreateIssues   bool `json:"create_issues"`
+	EditIssues     bool `json:"edit_issues"`
+}
+
+type jiraValidateConnectionResult struct {
+	BaseURL             string                    `json:"base_url"`
+	Authenticated       bool                      `json:"authenticated"`
+	AuthStatusCode      int                       `json:"auth_status_code"`
+	AuthError           string                    `json:"auth_error,omitempty"`
+	Account             jiraValidationAccount     `json:"account,omitempty"`
+	VisibleProjectCount int                       `json:"visible_project_count"`
+	VisibleProjects     []jiraProject             `json:"visible_projects,omitempty"`
+	ProjectKey          string                    `json:"project_key,omitempty"`
+	ProjectFound        bool                      `json:"project_found,omitempty"`
+	PermissionStatus    int                       `json:"permission_status_code,omitempty"`
+	Permissions         jiraValidationPermissions `json:"permissions,omitempty"`
+	Recommendations     []string                  `json:"recommendations,omitempty"`
+}
+
+type jiraMyselfResponse struct {
+	AccountID   string `json:"accountId"`
+	DisplayName string `json:"displayName"`
+	Email       string `json:"emailAddress"`
+}
+
+type jiraPermissionState struct {
+	HavePermission bool `json:"havePermission"`
+}
+
+type jiraMyPermissionsResponse struct {
+	Permissions map[string]jiraPermissionState `json:"permissions"`
 }
 
 type githubRepoRef struct {

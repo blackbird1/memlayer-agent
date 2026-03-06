@@ -23,7 +23,9 @@ func listLocalToolNames() []string {
 	return []string{
 		"jira_get_assigned_issues",
 		"jira_create_issue",
+		"jira_assign_issue",
 		"jira_list_projects",
+		"jira_validate_connection",
 		"github_get_recent_commits",
 		"github_get_active_pull_requests",
 		"github_list_recent_contributed_repositories",
@@ -66,10 +68,26 @@ func buildLocalToolset() ([]*genai.FunctionDeclaration, map[string]ToolExecutor)
 			}, []string{"project_key", "summary"}),
 		},
 		{
+			Name:        "jira_assign_issue",
+			Description: "Assign an existing Jira issue to a Jira user accountId.",
+			Parameters: schemaObject(map[string]*genai.Schema{
+				"issue_key":   schemaString("Jira issue key, e.g. ENG-123."),
+				"assignee_id": schemaString("Jira accountId of the assignee."),
+			}, []string{"issue_key", "assignee_id"}),
+		},
+		{
 			Name:        "jira_list_projects",
 			Description: "List Jira projects visible to the configured Jira account.",
 			Parameters: schemaObject(map[string]*genai.Schema{
 				"max_results": schemaInteger("Maximum number of projects to return (1-200). Defaults to 50."),
+			}, nil),
+		},
+		{
+			Name:        "jira_validate_connection",
+			Description: "Validate Jira authentication, visible projects, and project-level permissions for creating issues.",
+			Parameters: schemaObject(map[string]*genai.Schema{
+				"project_key": schemaString("Optional Jira project key to validate, e.g. ENG."),
+				"max_results": schemaInteger("Maximum number of visible projects to return (1-200). Defaults to 20."),
 			}, nil),
 		},
 		{
@@ -137,7 +155,9 @@ func buildLocalToolset() ([]*genai.FunctionDeclaration, map[string]ToolExecutor)
 	executors := map[string]ToolExecutor{
 		"jira_get_assigned_issues":                    toolset.jiraGetAssignedIssues,
 		"jira_create_issue":                           toolset.jiraCreateIssue,
+		"jira_assign_issue":                           toolset.jiraAssignIssue,
 		"jira_list_projects":                          toolset.jiraListProjects,
+		"jira_validate_connection":                    toolset.jiraValidateConnection,
 		"github_get_recent_commits":                   toolset.githubGetRecentCommits,
 		"github_get_active_pull_requests":             toolset.githubGetActivePullRequests,
 		"github_list_recent_contributed_repositories": toolset.githubListRecentContributedRepositories,
@@ -210,6 +230,26 @@ func (t *localTools) jiraCreateIssue(ctx context.Context, args map[string]any) (
 	return marshalJSON(result)
 }
 
+func (t *localTools) jiraAssignIssue(ctx context.Context, args map[string]any) (string, error) {
+	issueKey, err := getRequiredStringArg(args, "issue_key")
+	if err != nil {
+		return "", err
+	}
+	assigneeID, err := getRequiredStringArg(args, "assignee_id")
+	if err != nil {
+		return "", err
+	}
+
+	t.logger.Info("Tool execution started", "tool", "jira_assign_issue", "issue_key", issueKey)
+	result, err := t.jira.AssignIssue(ctx, issueKey, assigneeID)
+	if err != nil {
+		t.logger.Error("Tool execution failed", "tool", "jira_assign_issue", "issue_key", issueKey, "error", err)
+		return "", err
+	}
+	t.logger.Info("Tool execution finished", "tool", "jira_assign_issue", "issue_key", issueKey, "assignee_id", assigneeID)
+	return marshalJSON(result)
+}
+
 func (t *localTools) jiraListProjects(ctx context.Context, args map[string]any) (string, error) {
 	maxResults, err := getOptionalIntArg(args, "max_results", 50, 1, 200)
 	if err != nil {
@@ -223,6 +263,26 @@ func (t *localTools) jiraListProjects(ctx context.Context, args map[string]any) 
 		return "", err
 	}
 	t.logger.Info("Tool execution finished", "tool", "jira_list_projects", "count", result.Count)
+	return marshalJSON(result)
+}
+
+func (t *localTools) jiraValidateConnection(ctx context.Context, args map[string]any) (string, error) {
+	projectKey, err := getOptionalStringArg(args, "project_key", "")
+	if err != nil {
+		return "", err
+	}
+	maxResults, err := getOptionalIntArg(args, "max_results", 20, 1, 200)
+	if err != nil {
+		return "", err
+	}
+
+	t.logger.Info("Tool execution started", "tool", "jira_validate_connection", "project_key", projectKey, "max_results", maxResults)
+	result, err := t.jira.ValidateConnection(ctx, projectKey, maxResults)
+	if err != nil {
+		t.logger.Error("Tool execution failed", "tool", "jira_validate_connection", "project_key", projectKey, "error", err)
+		return "", err
+	}
+	t.logger.Info("Tool execution finished", "tool", "jira_validate_connection", "project_key", projectKey, "authenticated", result.Authenticated, "visible_project_count", result.VisibleProjectCount)
 	return marshalJSON(result)
 }
 
