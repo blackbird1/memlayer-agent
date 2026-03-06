@@ -32,6 +32,37 @@
             max-width: 80%;
             word-wrap: break-word;
         }
+        .message p {
+            margin: 0 0 8px 0;
+        }
+        .message p:last-child {
+            margin-bottom: 0;
+        }
+        .message ul, .message ol {
+            margin: 0 0 8px 20px;
+            padding: 0;
+        }
+        .message code {
+            font-family: monospace;
+            background: rgba(0, 0, 0, 0.08);
+            padding: 1px 4px;
+            border-radius: 4px;
+        }
+        .message pre {
+            margin: 8px 0;
+            padding: 10px;
+            border-radius: 8px;
+            overflow-x: auto;
+            background: rgba(0, 0, 0, 0.08);
+        }
+        .message pre code {
+            background: transparent;
+            padding: 0;
+        }
+        .message a {
+            color: inherit;
+            text-decoration: underline;
+        }
         .user-message {
             background-color: #007bff;
             color: white;
@@ -139,11 +170,115 @@
         const sessionId = "session-" + Math.random().toString(36).substr(2, 9);
         const API_URL = "/api/chat";
 
+        function escapeHtml(text) {
+            return text
+                .replaceAll('&', '&amp;')
+                .replaceAll('<', '&lt;')
+                .replaceAll('>', '&gt;')
+                .replaceAll('"', '&quot;')
+                .replaceAll("'", '&#39;');
+        }
+
+        function renderInlineMarkdown(text) {
+            return text
+                .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+                .replace(/`([^`]+)`/g, '<code>$1</code>')
+                .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+                .replace(/\*([^*]+)\*/g, '<em>$1</em>');
+        }
+
+        function renderBasicMarkdown(text) {
+            const escaped = escapeHtml(text);
+            const codeBlocks = [];
+            let withCodePlaceholders = escaped.replace(/```([\s\S]*?)```/g, (_, code) => {
+                const idx = codeBlocks.length;
+                codeBlocks.push(`<pre><code>${code.trim()}</code></pre>`);
+                return `@@CODEBLOCK_${idx}@@`;
+            });
+
+            const lines = withCodePlaceholders.split('\n');
+            const html = [];
+            let inUl = false;
+            let inOl = false;
+
+            function closeLists() {
+                if (inUl) {
+                    html.push('</ul>');
+                    inUl = false;
+                }
+                if (inOl) {
+                    html.push('</ol>');
+                    inOl = false;
+                }
+            }
+
+            lines.forEach((line) => {
+                const ulMatch = line.match(/^\s*[-*]\s+(.+)$/);
+                const olMatch = line.match(/^\s*\d+\.\s+(.+)$/);
+
+                if (ulMatch) {
+                    if (inOl) {
+                        html.push('</ol>');
+                        inOl = false;
+                    }
+                    if (!inUl) {
+                        html.push('<ul>');
+                        inUl = true;
+                    }
+                    html.push(`<li>${renderInlineMarkdown(ulMatch[1])}</li>`);
+                    return;
+                }
+
+                if (olMatch) {
+                    if (inUl) {
+                        html.push('</ul>');
+                        inUl = false;
+                    }
+                    if (!inOl) {
+                        html.push('<ol>');
+                        inOl = true;
+                    }
+                    html.push(`<li>${renderInlineMarkdown(olMatch[1])}</li>`);
+                    return;
+                }
+
+                closeLists();
+                if (line.trim() === '') {
+                    return;
+                }
+                if (line.startsWith('### ')) {
+                    html.push(`<p><strong>${renderInlineMarkdown(line.slice(4))}</strong></p>`);
+                    return;
+                }
+                if (line.startsWith('## ')) {
+                    html.push(`<p><strong>${renderInlineMarkdown(line.slice(3))}</strong></p>`);
+                    return;
+                }
+                if (line.startsWith('# ')) {
+                    html.push(`<p><strong>${renderInlineMarkdown(line.slice(2))}</strong></p>`);
+                    return;
+                }
+                html.push(`<p>${renderInlineMarkdown(line)}</p>`);
+            });
+
+            closeLists();
+
+            let output = html.join('');
+            codeBlocks.forEach((block, idx) => {
+                output = output.replace(`@@CODEBLOCK_${idx}@@`, block);
+            });
+            return output;
+        }
+
         function appendMessage(text, isUser, isLoading = false) {
             const messagesDiv = document.getElementById('messages');
             const messageDiv = document.createElement('div');
             messageDiv.className = `message ${isUser ? 'user-message' : 'bot-message'} ${isLoading ? 'bot-loading' : ''}`;
-            messageDiv.textContent = text;
+            if (isLoading) {
+                messageDiv.textContent = text;
+            } else {
+                messageDiv.innerHTML = renderBasicMarkdown(text);
+            }
             messagesDiv.appendChild(messageDiv);
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
             return messageDiv;
