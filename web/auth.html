@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ADK Authentication</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f8f9fa;
+        }
+        .auth-card {
+            background-color: white;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.1);
+            text-align: center;
+            max-width: 450px;
+            width: 100%;
+        }
+        .logo {
+            font-size: 32px;
+            font-weight: 800;
+            color: #007bff;
+            margin-bottom: 8px;
+            letter-spacing: -1px;
+        }
+        h1 {
+            font-size: 24px;
+            color: #333;
+            margin-bottom: 16px;
+        }
+        p {
+            color: #666;
+            line-height: 1.5;
+            margin-bottom: 24px;
+        }
+        .input-group {
+            text-align: left;
+            margin-bottom: 16px;
+        }
+        .input-group label {
+            display: block;
+            font-size: 14px;
+            font-weight: 600;
+            color: #495057;
+            margin-bottom: 6px;
+        }
+        .input-group input {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #ced4da;
+            border-radius: 6px;
+            font-size: 16px;
+            box-sizing: border-box;
+        }
+        .oidc-button {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            background-color: #007bff;
+            color: white;
+            padding: 14px 24px;
+            border-radius: 6px;
+            text-decoration: none;
+            font-weight: 600;
+            transition: all 0.2s;
+            cursor: pointer;
+            border: none;
+            width: 100%;
+            font-size: 16px;
+            margin-top: 12px;
+        }
+        .oidc-button:hover {
+            background-color: #0056b3;
+            transform: translateY(-1px);
+        }
+        .secondary-button {
+            background-color: #6c757d;
+            margin-top: 12px;
+        }
+        .secondary-button:hover {
+            background-color: #5a6268;
+        }
+        .token-display {
+            margin-top: 24px;
+            padding: 16px;
+            background-color: #f1f3f5;
+            border: 1px solid #dee2e6;
+            border-radius: 6px;
+            word-break: break-all;
+            font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+            font-size: 12px;
+            text-align: left;
+            display: none;
+        }
+        .action-buttons {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin-top: 24px;
+        }
+        .btn {
+            padding: 10px 20px;
+            font-size: 14px;
+            font-weight: 600;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+            display: none;
+        }
+        .btn-success { background-color: #28a745; color: white; }
+        .btn-success:hover { background-color: #218838; }
+        .btn-primary { background-color: #007bff; color: white; }
+        .btn-primary:hover { background-color: #0069d9; }
+        .btn-outline { background-color: transparent; border: 1px solid #007bff; color: #007bff; }
+        .btn-outline:hover { background-color: #e7f1ff; }
+
+        .status {
+            margin-top: 20px;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        .status.error { color: #dc3545; }
+        .status.success { color: #28a745; }
+        
+        .mcp-info {
+            font-size: 12px;
+            color: #888;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #eee;
+        }
+    </style>
+</head>
+<body>
+    <div class="auth-card">
+        <div class="logo">ADK</div>
+        <h1 id="title">Authentication</h1>
+        <p id="description">Sign in to sync your professional memory across Gemini, Codex, and other ADK tools.</p>
+        
+        <div id="loginForm">
+            <div class="input-group">
+                <label for="tenantId">Tenant (Org ID)</label>
+                <input type="text" id="tenantId" placeholder="e.g. default, system, or your-org" value="default">
+            </div>
+            <div class="input-group">
+                <label for="subject">Subject (User ID / Email)</label>
+                <input type="text" id="subject" placeholder="e.g. user@example.com">
+            </div>
+
+            <button id="loginBtn" class="oidc-button" onclick="startLogin()">
+                <span>Continue with SSO</span>
+            </button>
+            <button id="devLoginBtn" class="oidc-button secondary-button" onclick="devLogin()">
+                <span>Issue Dev Token</span>
+            </button>
+        </div>
+        
+        <div id="status" class="status"></div>
+        
+        <div id="tokenContainer" class="token-display">
+            <strong>Access Token:</strong>
+            <div id="tokenValue" style="margin-top: 8px; color: #495057;"></div>
+        </div>
+        
+        <div class="action-buttons">
+            <button id="copyBtn" class="btn btn-success" onclick="copyToken()">Copy Token</button>
+            <button id="redirectBtn" class="btn btn-primary" onclick="manualRedirect()">Return to App</button>
+            <button id="goChatBtn" class="btn btn-outline" onclick="goToChat()">Open Web Chat</button>
+        </div>
+
+        <div id="mcpInfo" class="mcp-info" style="display: none;">
+            Detected MCP login request. You will be redirected back to your IDE automatically.
+        </div>
+    </div>
+
+    <script>
+        // Configuration from URL
+        const urlParams = new URLSearchParams(window.location.search);
+        const redirectUri = urlParams.get('redirect_uri');
+        const state = urlParams.get('state');
+
+        window.onload = () => {
+            // 1. Try to extract token from various places (OAuth2 standard)
+            const hashParams = new URLSearchParams(window.location.hash.substring(1));
+            const token = urlParams.get('token') || hashParams.get('access_token');
+            
+            if (redirectUri) {
+                document.getElementById('mcpInfo').style.display = 'block';
+            }
+
+            if (token) {
+                handleSuccessfulLogin(token);
+            }
+        };
+
+        function startLogin() {
+            const tenantId = document.getElementById('tenantId').value.trim();
+            const subject = document.getElementById('subject').value.trim();
+
+            document.getElementById('status').textContent = 'Connecting to identity provider...';
+            document.getElementById('status').className = 'status';
+            
+            // Pass through redirect_uri, state, and suggested tenant/sub to the server-side OIDC flow
+            let loginUrl = '/auth/login';
+            const params = new URLSearchParams();
+            if (redirectUri) params.append('redirect_uri', redirectUri);
+            if (state) params.append('state', state);
+            if (tenantId) params.append('tenant_id', tenantId);
+            if (subject) params.append('subject', subject);
+            
+            const queryString = params.toString();
+            if (queryString) loginUrl += '?' + queryString;
+            
+            window.location.href = loginUrl;
+        }
+
+        async function devLogin() {
+            const tenantId = document.getElementById('tenantId').value.trim();
+            const subject = document.getElementById('subject').value.trim();
+            const responseType = urlParams.get('response_type') || 'token';
+
+            if (!tenantId || !subject) {
+                document.getElementById('status').textContent = 'Error: Tenant and Subject are required for dev token issuance.';
+                document.getElementById('status').className = 'status error';
+                return;
+            }
+
+            document.getElementById('status').textContent = 'Issuing development credentials...';
+            document.getElementById('status').className = 'status';
+
+            try {
+                const response = await fetch('/auth/dev-login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        tenant_id: tenantId, 
+                        subject: subject,
+                        response_type: responseType 
+                    })
+                });
+
+                const data = await response.json();
+                if (response.ok) {
+                    if (data.code) {
+                        // Handle Authorization Code flow redirect
+                        if (redirectUri) {
+                            const target = new URL(redirectUri);
+                            target.searchParams.set('code', data.code);
+                            if (state) target.searchParams.set('state', state);
+                            document.getElementById('status').textContent = 'Success. Redirecting...';
+                            window.location.href = target.toString();
+                        } else {
+                            document.getElementById('status').textContent = 'Code generated: ' + data.code;
+                        }
+                    } else if (data.token) {
+                        handleSuccessfulLogin(data.token);
+                    }
+                } else {
+                    document.getElementById('status').textContent = 'Error: ' + (data.error || 'Failed to issue credentials');
+                    document.getElementById('status').className = 'status error';
+                }
+            } catch (err) {
+                document.getElementById('status').textContent = 'Error: Connection failed';
+                document.getElementById('status').className = 'status error';
+            }
+        }
+
+        function handleSuccessfulLogin(token) {
+            document.getElementById('loginForm').style.display = 'none';
+            document.getElementById('title').textContent = 'Authenticated';
+            document.getElementById('description').textContent = 'You have successfully logged in.';
+            
+            document.getElementById('status').textContent = 'Login verified.';
+            document.getElementById('status').className = 'status success';
+            
+            document.getElementById('tokenContainer').style.display = 'block';
+            document.getElementById('tokenValue').textContent = token;
+            
+            document.getElementById('copyBtn').style.display = 'block';
+            document.getElementById('goChatBtn').style.display = 'block';
+            
+            // Store locally for web usage
+            setCookie("mcp_bearer", token, 30);
+
+            // Handle Redirects (MCP / IDE)
+            if (redirectUri) {
+                document.getElementById('redirectBtn').style.display = 'block';
+                performAutoRedirect(token);
+            }
+        }
+
+        function performAutoRedirect(token) {
+            document.getElementById('status').textContent = 'Redirecting you back to the app...';
+            
+            try {
+                const target = new URL(redirectUri);
+                // Append token and state to the redirect URI
+                target.searchParams.set('token', token);
+                if (state) target.searchParams.set('state', state);
+                
+                // For deep links (mcp://, vscode://), some browsers might block auto-redirects
+                // without user interaction, so we show the "Return to App" button just in case.
+                setTimeout(() => {
+                    window.location.href = target.toString();
+                }, 1000);
+            } catch (e) {
+                console.error('Invalid redirect_uri:', e);
+                document.getElementById('status').textContent = 'Ready. Please return to your app.';
+            }
+        }
+
+        function manualRedirect() {
+            const token = document.getElementById('tokenValue').textContent;
+            const target = new URL(redirectUri);
+            target.searchParams.set('token', token);
+            if (state) target.searchParams.set('state', state);
+            window.location.href = target.toString();
+        }
+
+        function copyToken() {
+            const token = document.getElementById('tokenValue').textContent;
+            navigator.clipboard.writeText(token).then(() => {
+                const copyBtn = document.getElementById('copyBtn');
+                const originalText = copyBtn.textContent;
+                copyBtn.textContent = 'Copied!';
+                setTimeout(() => {
+                    copyBtn.textContent = originalText;
+                }, 2000);
+            });
+        }
+
+        function goToChat() {
+            window.location.href = '/';
+        }
+
+        function setCookie(name, value, days) {
+            const expires = new Date();
+            expires.setTime(expires.getTime() + (days * 24 * 60 * 60 * 1000));
+            document.cookie = `${name}=${value};expires=${expires.toUTCString()};path=/;SameSite=Strict`;
+        }
+    </script>
+</body>
+</html>
