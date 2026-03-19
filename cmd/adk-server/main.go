@@ -87,6 +87,7 @@ type PersistedFunctionResp struct {
 var (
 	logger      *slog.Logger
 	redisClient *redis.Client
+	mcpManager  *MCPServerManager
 )
 
 func init() {
@@ -111,6 +112,14 @@ func main() {
 	if apiKey == "" {
 		logger.Error("GEMINI_API_KEY or GOOGLE_API_KEY is required")
 		os.Exit(1)
+	}
+
+	mcpManager = NewMCPServerManager(logger)
+	// Use a background context with timeout for initial connection
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := mcpManager.LoadAndConnect(ctx); err != nil {
+		logger.Error("Failed to initialize MCP manager", "error", err)
 	}
 
 	toolNames := listLocalToolNames()
@@ -141,6 +150,7 @@ func main() {
 		logger.Info("Received chat request", "sessionId", req.SessionID)
 
 		steps, resp, err := handleChat(r.Context(), req.SessionID, req.Message, apiKey)
+
 		if err != nil {
 			logger.Error("Error handling chat", "error", err, "sessionId", req.SessionID)
 			json.NewEncoder(w).Encode(ChatResponse{Error: err.Error()})
@@ -191,6 +201,23 @@ func handleChat(ctx context.Context, sessionID, message, apiKey string) ([]ChatS
 		toolExecutors[name] = executor
 		if _, exists := toolDisplayNames[name]; !exists {
 			toolDisplayNames[name] = name
+		}
+	}
+
+	// Register remote MCP tools if available.
+	if mcpManager != nil {
+		mcpDecls, mcpExecutors, err := mcpManager.ListAllTools(ctx)
+		if err != nil {
+			logger.Error("Failed to list MCP tools", "sessionId", sessionID, "error", err)
+		} else {
+			funcDecls = append(funcDecls, mcpDecls...)
+			for name, executor := range mcpExecutors {
+				toolExecutors[name] = executor
+				if _, exists := toolDisplayNames[name]; !exists {
+					toolDisplayNames[name] = name
+				}
+			}
+			logger.Info("MCP tools registered", "sessionId", sessionID, "count", len(mcpDecls))
 		}
 	}
 

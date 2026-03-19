@@ -1,52 +1,184 @@
 # Autonomize Interview ADK Wrapper
 
-This project wraps the copied ADK server + web UI and adds local model tools for GitHub and Jira workflows.
+Local ADK-style chat stack with:
+- Go API server (`adk-server`) on `:9090`
+- Redis session/history store on `:6379`
+- Nginx web UI (`adk-web`) on `:8080` with `/api/*` proxy to `adk-server`
 
-## Homework Tool Coverage
+## Setup Pattern
 
-Implemented ADK tools:
+Use this exact flow every time:
+1. Prepare env file and secrets.
+2. Start services (Docker recommended, local also supported).
+3. Run smoke checks (API + UI).
+4. Validate optional tool integrations (GitHub/Jira).
+5. Troubleshoot from logs if checks fail.
 
-- `jira_get_assigned_issues`: assigned issues, statuses, and recent updates for a member
-- `jira_create_issue`: create a Jira issue in a project
-- `jira_assign_issue`: assign a Jira issue to a Jira accountId
-- `jira_list_projects`: list Jira projects visible to the configured account
-- `jira_validate_connection`: validate Jira authentication/project visibility
-- `jira_search_issues`: search issues via JQL
-- `jira_get_issue`: get Jira issue details by issue key
-- `github_get_recent_commits`: recent commits by GitHub user
-- `github_get_active_pull_requests`: active/open PRs by GitHub user
-- `github_list_recent_contributed_repositories`: recently contributed repositories
-- `github_list_pull_requests`: list pull requests for a repository
-- `github_get_issue`: get GitHub issue details by issue number
+## Prerequisites
 
-## Environment
+Docker path:
+- Docker Engine
+- Docker Compose v2
 
-Copy `.env.example` to your runtime env file and set values:
+Local path (without Docker for server process):
+- Go `1.25.5` (matches [`go.mod`](/Users/stephenturner/src/AutonomizeInterview/go.mod))
+- Redis `7+` reachable at `REDIS_ADDR` (default `localhost:6379`)
 
-- `GOOGLE_API_KEY` or `GEMINI_API_KEY` (required)
-- `GITHUB_TOKEN` (required for GitHub tools)
-- `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` (required for Jira tools)
-- `REDIS_ADDR` (optional, defaults to `localhost:6379`)
+External credentials:
+- Required: one of `GOOGLE_API_KEY` or `GEMINI_API_KEY`
+- Optional: `GITHUB_TOKEN` for GitHub tools
+- Optional: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` for Jira tools
 
-## Run server locally
+## Step 1: Configure Environment
+
+Create a local env file and point `.env` at it:
 
 ```bash
-go run ./cmd/adk-server
+cp .env.example .env.local
+ln -sf .env.local .env
 ```
 
-Server starts on `:9090`.
+Fill `.env.local`:
 
-## Run web frontend
+```bash
+# Required (set one)
+GOOGLE_API_KEY=your_google_or_gemini_key
+# GEMINI_API_KEY=your_google_or_gemini_key
 
-Serve `web/index.html` with nginx (or any static server) and proxy `/api/` to `adk-server:9090` (see `web/nginx.conf`).
+# Local server default (Docker compose overrides for adk-server)
+REDIS_ADDR=localhost:6379
 
-## Run with Docker Compose
+# Optional GitHub integration
+GITHUB_TOKEN=ghp_xxx
+GITHUB_API_BASE_URL=https://api.github.com
 
-1. Ensure `.env` exists (it can be a symlink to your selected environment file).
-2. Start the stack:
+# Optional Jira integration
+JIRA_BASE_URL=https://your-domain.atlassian.net
+JIRA_EMAIL=you@example.com
+JIRA_API_TOKEN=jira_api_token
+```
+
+## Step 2A: Start with Docker (Recommended)
+
+Build and run all services:
 
 ```bash
 docker compose up --build
 ```
 
-3. Open `http://localhost:8080`.
+Expected services:
+- `adk-web` on `http://localhost:8080`
+- `adk-server` on `http://localhost:9090`
+- `adk-redis` on `localhost:6379`
+
+Check status:
+
+```bash
+docker compose ps
+```
+
+Stop stack:
+
+```bash
+docker compose down
+```
+
+## Step 2B: Start Server Locally (Alternative)
+
+Use this when you want to run Go directly.
+
+Download dependencies:
+
+```bash
+go mod download
+```
+
+Start Redis (example):
+
+```bash
+docker run --rm -p 6379:6379 redis:7-alpine
+```
+
+Start API server:
+
+```bash
+go run ./cmd/adk-server
+```
+
+Expected startup behavior:
+- Logs include local tool registration count.
+- Server starts listening on port `9090`.
+
+For UI in local mode:
+- Either run Docker Compose just for web/proxy, or
+- Serve static UI yourself using [`web/index.html`](/Users/stephenturner/src/AutonomizeInterview/web/index.html) and proxy rules in [`web/nginx.conf`](/Users/stephenturner/src/AutonomizeInterview/web/nginx.conf)
+
+## Step 3: Smoke Test
+
+API smoke test:
+
+```bash
+curl -sS -X POST http://localhost:9090/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message":"What is Stephen working on?","sessionId":"smoke-test"}'
+```
+
+Expected result:
+- JSON response with at least `response` or `error`
+- If tools are configured, `steps` may include tool call/result entries
+
+UI smoke test:
+1. Open `http://localhost:8080`
+2. Send a test message
+3. Confirm response is rendered and no proxy/network error appears in browser devtools
+
+## Step 4: Validate Integrations (Optional)
+
+GitHub:
+- Confirm `GITHUB_TOKEN` is set
+- Run a chat prompt that should trigger GitHub activity lookup
+
+Jira:
+- Confirm `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` are set
+- `JIRA_BASE_URL` must look like `https://<tenant>.atlassian.net`
+
+## Tool Coverage
+
+Jira tools:
+- `jira_get_assigned_issues`
+- `jira_create_issue`
+- `jira_assign_issue`
+- `jira_list_projects`
+- `jira_validate_connection`
+- `jira_search_issues`
+- `jira_get_issue`
+
+GitHub tools:
+- `github_get_recent_commits`
+- `github_get_active_pull_requests`
+- `github_list_recent_contributed_repositories`
+- `github_list_pull_requests`
+- `github_get_issue`
+
+## Troubleshooting
+
+`GEMINI_API_KEY or GOOGLE_API_KEY is required`
+- Cause: neither API key is set.
+- Fix: set one key in `.env.local`, then restart server/container.
+
+`Failed to connect to Redis`
+- Cause: Redis not running or unreachable address.
+- Fix: verify Redis is up and `REDIS_ADDR` is correct.
+- Note: in Docker Compose, `adk-server` uses `REDIS_ADDR=redis:6379`.
+
+`401/403` from GitHub or Jira tools
+- Cause: bad token, missing scopes, or wrong Jira tenant URL.
+- Fix: rotate credentials, verify scopes, and confirm URL format.
+
+UI loads but chat fails
+- Cause: API/proxy issue.
+- Fix: inspect `adk-server` logs and confirm nginx `/api/` proxy target is `adk-server:9090` in Docker network.
+
+Port conflict on `8080`, `9090`, or `6379`
+- Cause: local process already bound to required port.
+- Fix: stop conflicting process or remap port(s) in [`docker-compose.yml`](/Users/stephenturner/src/AutonomizeInterview/docker-compose.yml).
