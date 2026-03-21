@@ -4,3 +4,5 @@
 .codex
 .gemini
 bin/
+.DS_Store
+*.log

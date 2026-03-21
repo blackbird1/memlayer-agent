@@ -11,7 +11,7 @@ Use this exact flow every time:
 1. Prepare env file and secrets.
 2. Start services (Docker recommended, local also supported).
 3. Run smoke checks (API + UI).
-4. Validate optional tool integrations (GitHub/Jira).
+4. Validate optional MCP integrations.
 5. Troubleshoot from logs if checks fail.
 
 ## Prerequisites
@@ -26,8 +26,7 @@ Local path (without Docker for server process):
 
 External credentials:
 - Required: one of `GOOGLE_API_KEY` or `GEMINI_API_KEY`
-- Optional: `GITHUB_TOKEN` for GitHub tools
-- Optional: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` for Jira tools
+- Optional: `MEMLAYER_MCP_BEARER_TOKEN` for MemLayer MCP over HTTP
 
 ## Step 1: Configure Environment
 
@@ -48,15 +47,11 @@ GOOGLE_API_KEY=your_google_or_gemini_key
 # Local server default (Docker compose overrides for adk-server)
 REDIS_ADDR=localhost:6379
 
-# Optional GitHub integration
-GITHUB_TOKEN=ghp_xxx
-GITHUB_API_BASE_URL=https://api.github.com
-
-# Optional Jira integration
-JIRA_BASE_URL=https://your-domain.atlassian.net
-JIRA_EMAIL=you@example.com
-JIRA_API_TOKEN=jira_api_token
+# Optional MemLayer MCP integration
+MEMLAYER_MCP_BEARER_TOKEN=your_memlayer_mcp_bearer_token
 ```
+
+If you configure MemLayer MCP in a settings file, the server also accepts a `bearerToken` or `bearer_token` field and converts it into an `Authorization: Bearer ...` header. An explicit `headers.Authorization` entry still wins if you prefer to set the header directly.
 
 ## Step 2A: Start with Docker (Recommended)
 
@@ -134,31 +129,9 @@ UI smoke test:
 
 ## Step 4: Validate Integrations (Optional)
 
-GitHub:
-- Confirm `GITHUB_TOKEN` is set
-- Run a chat prompt that should trigger GitHub activity lookup
-
-Jira:
-- Confirm `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` are set
-- `JIRA_BASE_URL` must look like `https://<tenant>.atlassian.net`
-
-## Tool Coverage
-
-Jira tools:
-- `jira_get_assigned_issues`
-- `jira_create_issue`
-- `jira_assign_issue`
-- `jira_list_projects`
-- `jira_validate_connection`
-- `jira_search_issues`
-- `jira_get_issue`
-
-GitHub tools:
-- `github_get_recent_commits`
-- `github_get_active_pull_requests`
-- `github_list_recent_contributed_repositories`
-- `github_list_pull_requests`
-- `github_get_issue`
+MemLayer MCP:
+- Confirm `MEMLAYER_MCP_BEARER_TOKEN` is set if your MCP server requires bearer auth
+- Run a chat prompt that should trigger a MemLayer MCP tool
 
 ## Troubleshooting
 
@@ -170,10 +143,6 @@ GitHub tools:
 - Cause: Redis not running or unreachable address.
 - Fix: verify Redis is up and `REDIS_ADDR` is correct.
 - Note: in Docker Compose, `adk-server` uses `REDIS_ADDR=redis:6379`.
-
-`401/403` from GitHub or Jira tools
-- Cause: bad token, missing scopes, or wrong Jira tenant URL.
-- Fix: rotate credentials, verify scopes, and confirm URL format.
 
 UI loads but chat fails
 - Cause: API/proxy issue.

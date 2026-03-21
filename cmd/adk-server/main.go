@@ -15,30 +15,13 @@ import (
 )
 
 const (
-	port                    = "9090"
-	sessionTTL              = 30 * time.Minute
-	teamMonitorSystemPrompt = `You are a Team Activity Monitor assistant.
+	port            = "9090"
+	sessionTTL      = 30 * time.Minute
+	assistantPrompt = `You are a concise assistant.
 
-Goal:
-Answer: "What is <member> working on these days?" using Jira and GitHub data.
-
-Rules:
-1. Always identify the target member from the user message.
-2. Always query both systems:
-   - Jira assigned issues (status + recent updates)
-   - GitHub recent commits
-   - GitHub active pull requests
-   - GitHub recently contributed repositories
-3. If member identity is ambiguous, ask one concise clarification question.
-4. If one source fails, continue with the other and clearly state partial results.
-5. If no activity exists, say so clearly and suggest the next check window.
-6. Keep output short, structured, and human-readable:
-   - Summary (1-2 lines)
-   - Jira
-   - GitHub
-   - Risks/Blockers (if inferable)
-7. Never invent activity. Only report tool results.
-8. Include exact dates/times from tool data when available.`
+Use available MCP tools when they help answer the user's question.
+If no relevant tool is available, answer directly and clearly state any limits.
+Keep responses short, structured, and grounded in tool results when tools are used.`
 )
 
 type ChatRequest struct {
@@ -122,9 +105,6 @@ func main() {
 		logger.Error("Failed to initialize MCP manager", "error", err)
 	}
 
-	toolNames := listLocalToolNames()
-	logger.Info("Local tools registered", "count", len(toolNames), "tools", toolNames)
-
 	http.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
 		enableCors(w)
 		if r.Method == "OPTIONS" {
@@ -184,7 +164,7 @@ func handleChat(ctx context.Context, sessionID, message, apiKey string) ([]ChatS
 	config := &genai.GenerateContentConfig{
 		SystemInstruction: &genai.Content{
 			Parts: []*genai.Part{
-				{Text: teamMonitorSystemPrompt},
+				{Text: assistantPrompt},
 			},
 		},
 	}
@@ -192,17 +172,6 @@ func handleChat(ctx context.Context, sessionID, message, apiKey string) ([]ChatS
 	funcDecls := make([]*genai.FunctionDeclaration, 0)
 	toolExecutors := make(map[string]ToolExecutor)
 	toolDisplayNames := make(map[string]string)
-
-	// Register local tool schemas (what the model can call) and
-	// executors (how calls are actually run on the server).
-	localDecls, localExecutors := buildLocalToolset()
-	funcDecls = append(funcDecls, localDecls...)
-	for name, executor := range localExecutors {
-		toolExecutors[name] = executor
-		if _, exists := toolDisplayNames[name]; !exists {
-			toolDisplayNames[name] = name
-		}
-	}
 
 	// Register remote MCP tools if available.
 	if mcpManager != nil {

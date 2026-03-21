@@ -26,9 +26,11 @@ type MCPServerConfig struct {
 	Env     map[string]string `json:"env,omitempty"`
 
 	// SSE-based config
-	URL     string            `json:"url,omitempty"`
-	Type    string            `json:"type,omitempty"` // "http" or "sse"
-	Headers map[string]string `json:"headers,omitempty"`
+	URL            string            `json:"url,omitempty"`
+	Type           string            `json:"type,omitempty"` // "http" or "sse"
+	Headers        map[string]string `json:"headers,omitempty"`
+	BearerToken    string            `json:"bearerToken,omitempty"`
+	BearerTokenAlt string            `json:"bearer_token,omitempty"`
 }
 
 type MCPServerManager struct {
@@ -48,16 +50,14 @@ func (m *MCPServerManager) LoadAndConnect(ctx context.Context) error {
 	if err != nil {
 		m.logger.Warn("No MCP settings found or failed to load", "error", err)
 		// Fallback to environment variables if no config file found
-		mcpURL := os.Getenv("MCP_URL")
+		mcpURL := strings.TrimSpace(os.Getenv("MCP_URL"))
 		if mcpURL != "" {
 			m.logger.Info("Falling back to MCP_URL from environment")
 			cfg := MCPServerConfig{
 				URL:  mcpURL,
 				Type: "sse",
 			}
-			if token := os.Getenv("MCP_BEARER_TOKEN"); token != "" {
-				cfg.Headers = map[string]string{"Authorization": "Bearer " + token}
-			}
+			cfg.Headers = resolveMCPHeaders(cfg)
 			return m.connectServer(ctx, "default", cfg)
 		}
 		return nil
@@ -104,6 +104,7 @@ func (m *MCPServerManager) discoverSettings() (*MCPSettings, error) {
 
 func (m *MCPServerManager) connectServer(ctx context.Context, name string, cfg MCPServerConfig) error {
 	var mcpClient *client.Client
+	headers := resolveMCPHeaders(cfg)
 
 	if cfg.Command != "" {
 		// Stdio client
@@ -111,7 +112,7 @@ func (m *MCPServerManager) connectServer(ctx context.Context, name string, cfg M
 		for k, v := range cfg.Env {
 			env = append(env, fmt.Sprintf("%s=%s", k, v))
 		}
-		// Inherit current environment if not specified? 
+		// Inherit current environment if not specified?
 		// Standard MCP usually merges. Let's merge with current env for better UX.
 		for _, e := range os.Environ() {
 			env = append(env, e)
@@ -124,7 +125,7 @@ func (m *MCPServerManager) connectServer(ctx context.Context, name string, cfg M
 		mcpClient = c
 	} else if cfg.URL != "" {
 		// SSE client
-		trans, err := transport.NewSSE(cfg.URL, transport.WithHeaders(cfg.Headers))
+		trans, err := transport.NewSSE(cfg.URL, transport.WithHeaders(headers))
 		if err != nil {
 			return fmt.Errorf("sse transport: %w", err)
 		}
@@ -154,6 +155,55 @@ func (m *MCPServerManager) connectServer(ctx context.Context, name string, cfg M
 	m.clients[name] = mcpClient
 	m.logger.Info("Connected to MCP server", "name", name)
 	return nil
+}
+
+func resolveMCPHeaders(cfg MCPServerConfig) map[string]string {
+	headers := make(map[string]string, len(cfg.Headers)+1)
+	for key, value := range cfg.Headers {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		headers[key] = value
+	}
+
+	for key, value := range headers {
+		if strings.EqualFold(key, "Authorization") && strings.TrimSpace(value) != "" {
+			return headers
+		}
+	}
+
+	token := firstNonEmpty(
+		strings.TrimSpace(cfg.BearerToken),
+		strings.TrimSpace(cfg.BearerTokenAlt),
+		strings.TrimSpace(os.Getenv("MEMLAYER_MCP_BEARER_TOKEN")),
+		strings.TrimSpace(os.Getenv("MCP_BEARER_TOKEN")),
+	)
+	if token == "" {
+		return headers
+	}
+
+	headers["Authorization"] = authorizationHeaderValue(token)
+	return headers
+}
+
+func authorizationHeaderValue(token string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(token), "bearer ") {
+		return token
+	}
+	return "Bearer " + token
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (m *MCPServerManager) ListAllTools(ctx context.Context) ([]*genai.FunctionDeclaration, map[string]ToolExecutor, error) {
