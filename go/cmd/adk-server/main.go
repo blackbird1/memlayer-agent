@@ -99,7 +99,7 @@ func main() {
 
 	mcpManager = NewMCPServerManager(logger)
 	// Use a background context with timeout for initial connection
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	if err := mcpManager.LoadAndConnect(ctx); err != nil {
 		logger.Error("Failed to initialize MCP manager", "error", err)

@@ -4,5 +4,11 @@
 .codex
 .gemini
 bin/
+go/bin/
+python/.venv/
+python/**/__pycache__/
+python/.pytest_cache/
+python/build/
+python/dist/
 .DS_Store
 *.log

@@ -25,7 +25,7 @@ type MCPServerConfig struct {
 	Args    []string          `json:"args,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
 
-	// SSE-based config
+	// HTTP/SSE-based config
 	URL            string            `json:"url,omitempty"`
 	Type           string            `json:"type,omitempty"` // "http" or "sse"
 	Headers        map[string]string `json:"headers,omitempty"`
@@ -55,9 +55,8 @@ func (m *MCPServerManager) LoadAndConnect(ctx context.Context) error {
 			m.logger.Info("Falling back to MCP_URL from environment")
 			cfg := MCPServerConfig{
 				URL:  mcpURL,
-				Type: "sse",
+				Type: "http",
 			}
-			cfg.Headers = resolveMCPHeaders(cfg)
 			return m.connectServer(ctx, "default", cfg)
 		}
 		return nil
@@ -104,7 +103,7 @@ func (m *MCPServerManager) discoverSettings() (*MCPSettings, error) {
 
 func (m *MCPServerManager) connectServer(ctx context.Context, name string, cfg MCPServerConfig) error {
 	var mcpClient *client.Client
-	headers := resolveMCPHeaders(cfg)
+	var err error
 
 	if cfg.Command != "" {
 		// Stdio client
@@ -112,29 +111,38 @@ func (m *MCPServerManager) connectServer(ctx context.Context, name string, cfg M
 		for k, v := range cfg.Env {
 			env = append(env, fmt.Sprintf("%s=%s", k, v))
 		}
-		// Inherit current environment if not specified?
-		// Standard MCP usually merges. Let's merge with current env for better UX.
+		// Inherit current environment for better UX
 		for _, e := range os.Environ() {
 			env = append(env, e)
 		}
 
-		c, err := client.NewStdioMCPClient(cfg.Command, env, cfg.Args...)
+		mcpClient, err = client.NewStdioMCPClient(cfg.Command, env, cfg.Args...)
 		if err != nil {
 			return fmt.Errorf("stdio client: %w", err)
 		}
-		mcpClient = c
 	} else if cfg.URL != "" {
-		// SSE client
-		trans, err := transport.NewSSE(cfg.URL, transport.WithHeaders(headers))
-		if err != nil {
-			return fmt.Errorf("sse transport: %w", err)
+		// HTTP or SSE client
+		headers := resolveMCPHeaders(cfg)
+		
+		if cfg.Type == "sse" {
+			m.logger.Info("Connecting to SSE MCP server", "name", name, "url", cfg.URL)
+			mcpClient, err = client.NewSSEMCPClient(cfg.URL, transport.WithHeaders(headers))
+		} else {
+			m.logger.Info("Connecting to Streamable HTTP MCP server", "name", name, "url", cfg.URL)
+			mcpClient, err = client.NewStreamableHttpClient(cfg.URL, transport.WithHTTPHeaders(headers))
 		}
-		mcpClient = client.NewClient(trans)
-		if err := mcpClient.Start(ctx); err != nil {
-			return fmt.Errorf("sse start: %w", err)
+		
+		if err != nil {
+			return fmt.Errorf("client create: %w", err)
 		}
 	} else {
 		return fmt.Errorf("invalid config: missing command or url")
+	}
+
+	// Start initiates the connection and waits for endpoint handshake.
+	m.logger.Info("Starting MCP client transport", "name", name)
+	if err := mcpClient.Start(ctx); err != nil {
+		return fmt.Errorf("start: %w", err)
 	}
 
 	initRequest := mcp.InitializeRequest{
@@ -147,24 +155,28 @@ func (m *MCPServerManager) connectServer(ctx context.Context, name string, cfg M
 		},
 	}
 
-	_, err := mcpClient.Initialize(ctx, initRequest)
+	m.logger.Info("Initializing MCP session", "name", name)
+	_, err = mcpClient.Initialize(ctx, initRequest)
 	if err != nil {
 		return fmt.Errorf("initialize: %w", err)
 	}
 
 	m.clients[name] = mcpClient
-	m.logger.Info("Connected to MCP server", "name", name)
+	m.logger.Info("Successfully connected to MCP server", "name", name)
 	return nil
 }
 
 func resolveMCPHeaders(cfg MCPServerConfig) map[string]string {
-	headers := make(map[string]string, len(cfg.Headers)+1)
+	headers := make(map[string]string, len(cfg.Headers)+2)
 	for key, value := range cfg.Headers {
 		if strings.TrimSpace(value) == "" {
 			continue
 		}
 		headers[key] = value
 	}
+
+	// Disable buffering for SSE through proxies like Nginx
+	headers["X-Accel-Buffering"] = "no"
 
 	for key, value := range headers {
 		if strings.EqualFold(key, "Authorization") && strings.TrimSpace(value) != "" {
@@ -179,10 +191,13 @@ func resolveMCPHeaders(cfg MCPServerConfig) map[string]string {
 		strings.TrimSpace(os.Getenv("MCP_BEARER_TOKEN")),
 	)
 	if token == "" {
+		slog.Warn("No MCP bearer token found in config or environment")
 		return headers
 	}
 
-	headers["Authorization"] = authorizationHeaderValue(token)
+	authVal := authorizationHeaderValue(token)
+	headers["Authorization"] = authVal
+	slog.Info("MCP Authorization header resolved", "length", len(authVal), "prefix", authVal[:15]+"...")
 	return headers
 }
 
@@ -218,9 +233,6 @@ func (m *MCPServerManager) ListAllTools(ctx context.Context) ([]*genai.FunctionD
 		}
 
 		for _, tool := range resp.Tools {
-			// Naming collision handling: prefix with name if multiple servers?
-			// Standard MCP usually uses unique names or namespacing.
-			// For now, let's keep it simple.
 			decl := &genai.FunctionDeclaration{
 				Name:        tool.Name,
 				Description: tool.Description,
@@ -311,6 +323,9 @@ func convertAnyToGenaiSchema(propMap map[string]any) *genai.Schema {
 	if s.Type == genai.TypeArray {
 		if items, ok := propMap["items"].(map[string]any); ok {
 			s.Items = convertAnyToGenaiSchema(items)
+		} else {
+			// Gemini API requires 'items' for type 'array'
+			s.Items = &genai.Schema{Type: genai.TypeString}
 		}
 	}
 	return s

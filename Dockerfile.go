@@ -2,10 +2,11 @@ FROM golang:1.25 AS builder
 
 WORKDIR /app
 
-COPY go.mod ./
+# Context is now root, so we copy from go/
+COPY go/go.mod go/go.sum ./
 RUN go mod download
 
-COPY . .
+COPY go/ .
 
 RUN CGO_ENABLED=0 GOOS=linux go build -o /adk-server ./cmd/adk-server
 

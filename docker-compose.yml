@@ -14,13 +14,15 @@ services:
   adk-server:
     build:
       context: .
-      dockerfile: Dockerfile.adk-server
+      dockerfile: Dockerfile.go
     container_name: adk-server
     restart: unless-stopped
     env_file:
       - .env
     environment:
       REDIS_ADDR: redis:6379
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "9090:9090"
     depends_on:
@@ -30,7 +32,7 @@ services:
   adk-web:
     build:
       context: .
-      dockerfile: Dockerfile.adk-web
+      dockerfile: Dockerfile.web
     container_name: adk-web
     restart: unless-stopped
     ports:
