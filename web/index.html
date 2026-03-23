@@ -370,6 +370,10 @@
                     }
                     if (data.response) {
                         appendMessage(data.response, false);
+                    } else if (data.steps && data.steps.length > 0) {
+                        // Model completed tool calls but returned no final text — show last tool result
+                        const lastResult = [...data.steps].reverse().find(s => s.type === 'tool_result');
+                        appendMessage(lastResult ? lastResult.result : '(No response)', false);
                     }
                 }
             } catch (error) {

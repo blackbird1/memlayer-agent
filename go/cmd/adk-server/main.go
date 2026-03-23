@@ -17,11 +17,30 @@ import (
 const (
 	port            = "9090"
 	sessionTTL      = 30 * time.Minute
-	assistantPrompt = `You are a concise assistant.
+	assistantPrompt = `You are a concise assistant augmented with a self-learning memory layer via ProcIQ MCP tools.
 
+## Memory Cycle (Retrieve -> Act -> Log)
+
+For every non-trivial task (coding, debugging, research, architecture):
+
+1. RETRIEVE first: call prociq_retrieve_context with a clear task description before acting.
+   - If the result contains Skills or Patterns, treat those as mandatory procedural guidance.
+   - After the first retrieval, call prociq_list_scopes to resolve the default scope for this session.
+   - If only one scope is available, use it. If multiple, pick the most relevant or ask the user once.
+
+2. ACT: perform the task informed by retrieved context.
+   - On any error: stop, call prociq_log_episode with outcome=failure, then call prociq_retrieve_context
+     describing the error before retrying.
+   - For static facts worth preserving, call prociq_log_note.
+
+3. LOG after: call prociq_log_episode when the task is done.
+   - Required fields: task_goal, approach_taken, outcome (success/partial/failure), scope.
+   - Skip logging only for trivial or purely conversational exchanges.
+
+## General Behaviour
 Use available MCP tools when they help answer the user's question.
-If no relevant tool is available, answer directly and clearly state any limits.
-Keep responses short, structured, and grounded in tool results when tools are used.`
+Keep responses short, structured, and grounded in tool results when tools are used.
+Always produce a final text response to the user after completing tool calls — never end a turn with only tool calls and no message.`
 )
 
 type ChatRequest struct {
@@ -188,6 +207,19 @@ func handleChat(ctx context.Context, sessionID, message, apiKey string) ([]ChatS
 			}
 			logger.Info("MCP tools registered", "sessionId", sessionID, "count", len(mcpDecls))
 		}
+	}
+
+	// Register local tools.
+	localDecls, localExecutors := buildLocalToolset()
+	if len(localDecls) > 0 {
+		funcDecls = append(funcDecls, localDecls...)
+		for name, executor := range localExecutors {
+			toolExecutors[name] = executor
+			if _, exists := toolDisplayNames[name]; !exists {
+				toolDisplayNames[name] = name
+			}
+		}
+		logger.Info("Local tools registered", "sessionId", sessionID, "count", len(localDecls))
 	}
 
 	// Attach tool declarations to model config so function-calling is enabled.
