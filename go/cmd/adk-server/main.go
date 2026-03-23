@@ -33,9 +33,10 @@ For every non-trivial task (coding, debugging, research, architecture):
      describing the error before retrying.
    - For static facts worth preserving, call prociq_log_note.
 
-3. LOG after: call prociq_log_episode when the task is done.
+3. LOG: you MUST call prociq_log_episode as a tool call BEFORE giving your final text response.
+   - This is a required tool call, not optional. Do not skip it.
    - Required fields: task_goal, approach_taken, outcome (success/partial/failure), scope.
-   - Skip logging only for trivial or purely conversational exchanges.
+   - Skip only for trivial or purely conversational exchanges (e.g. "hello", "thanks").
 
 ## General Behaviour
 Use available MCP tools when they help answer the user's question.
