@@ -180,7 +180,7 @@ func handleChat(ctx context.Context, sessionID, message, apiKey string) ([]ChatS
 		return nil, "", fmt.Errorf("failed to create genai client: %w", err)
 	}
 
-	modelName := "gemini-3-flash-preview"
+	modelName := envOrDefault("MODEL", "gemini-3-flash-preview")
 	config := &genai.GenerateContentConfig{
 		SystemInstruction: &genai.Content{
 			Parts: []*genai.Part{
