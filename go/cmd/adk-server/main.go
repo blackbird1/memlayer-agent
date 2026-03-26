@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -64,21 +66,125 @@ type ChatResponse struct {
 
 type ToolExecutor func(ctx context.Context, args map[string]any) (string, error)
 
+// llmClient makes raw HTTP calls so that provider-specific fields (e.g.
+// Gemini's thought_signature on thinking models) are preserved verbatim in
+// the message history and replayed correctly on subsequent turns.
+type llmClient struct {
+	baseURL    string
+	apiKey     string
+	model      string
+	httpClient *http.Client
+}
+
+type rawToolCall struct {
+	ID   string
+	Name string
+	Args string
+}
+
+type completionResult struct {
+	// rawMessage is the full assistant message JSON, field-for-field as
+	// returned by the API. Stored verbatim so provider-specific extras
+	// (e.g. thought_signature) survive round-trips through history.
+	rawMessage   json.RawMessage
+	textContent  string
+	hasToolCalls bool
+	toolCalls    []rawToolCall
+}
+
+func (c *llmClient) complete(ctx context.Context, messages []json.RawMessage, tools []openai.Tool) (*completionResult, error) {
+	reqBody := map[string]any{
+		"model":    c.model,
+		"messages": messages,
+	}
+	if len(tools) > 0 {
+		reqBody["tools"] = tools
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	endpoint := strings.TrimRight(c.baseURL, "/") + "/chat/completions"
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("LLM request failed: status %d, body: %s", resp.StatusCode, respBody)
+	}
+
+	var apiResp struct {
+		Choices []struct {
+			Message json.RawMessage `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	if len(apiResp.Choices) == 0 {
+		return nil, nil
+	}
+
+	rawMsg := apiResp.Choices[0].Message
+
+	// Parse only the fields we need to drive the tool loop; the raw message
+	// is what gets stored in history so no fields are lost.
+	var parsed struct {
+		Content   *string `json:"content"`
+		ToolCalls []struct {
+			ID       string `json:"id"`
+			Function struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			} `json:"function"`
+		} `json:"tool_calls"`
+	}
+	if err := json.Unmarshal(rawMsg, &parsed); err != nil {
+		return nil, fmt.Errorf("failed to parse message fields: %w", err)
+	}
+
+	result := &completionResult{rawMessage: rawMsg}
+	if parsed.Content != nil {
+		result.textContent = *parsed.Content
+	}
+	for _, tc := range parsed.ToolCalls {
+		result.hasToolCalls = true
+		result.toolCalls = append(result.toolCalls, rawToolCall{
+			ID:   tc.ID,
+			Name: tc.Function.Name,
+			Args: tc.Function.Arguments,
+		})
+	}
+	return result, nil
+}
+
 var (
 	logger      *slog.Logger
 	redisClient *redis.Client
 	mcpManager  *MCPServerManager
-	llmClient   *openai.Client
-	llmModel    string
+	llm         *llmClient
 )
 
 func init() {
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, nil))
 }
 
-// resolveClient builds the OpenAI-compatible client from environment variables.
-// Supports Gemini, OpenAI, Ollama, and any other OpenAI-protocol provider.
-func resolveClient() (*openai.Client, string, error) {
+func resolveClient() (*llmClient, error) {
 	openAIKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
 	googleKey := firstNonEmpty(
 		strings.TrimSpace(os.Getenv("GOOGLE_API_KEY")),
@@ -90,6 +196,9 @@ func resolveClient() (*openai.Client, string, error) {
 	var apiKey string
 	if openAIKey != "" {
 		apiKey = openAIKey
+		if baseURL == "" {
+			baseURL = "https://api.openai.com/v1"
+		}
 		if model == "" {
 			model = "gpt-4o-mini"
 		}
@@ -102,14 +211,20 @@ func resolveClient() (*openai.Client, string, error) {
 			model = "gemini-2.0-flash"
 		}
 	} else {
-		return nil, "", fmt.Errorf("OPENAI_API_KEY or GOOGLE_API_KEY is required")
+		return nil, fmt.Errorf("OPENAI_API_KEY or GOOGLE_API_KEY is required")
 	}
 
-	cfg := openai.DefaultConfig(apiKey)
-	if baseURL != "" {
-		cfg.BaseURL = baseURL
-	}
-	return openai.NewClientWithConfig(cfg), model, nil
+	return &llmClient{
+		baseURL:    baseURL,
+		apiKey:     apiKey,
+		model:      model,
+		httpClient: &http.Client{},
+	}, nil
+}
+
+func rawMessage(v any) json.RawMessage {
+	b, _ := json.Marshal(v)
+	return b
 }
 
 func main() {
@@ -120,12 +235,12 @@ func main() {
 	}
 
 	var err error
-	llmClient, llmModel, err = resolveClient()
+	llm, err = resolveClient()
 	if err != nil {
 		logger.Error(err.Error())
 		os.Exit(1)
 	}
-	logger.Info("LLM client configured", "model", llmModel)
+	logger.Info("LLM client configured", "model", llm.model)
 
 	mcpManager = NewMCPServerManager(logger)
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -206,48 +321,38 @@ func handleChat(ctx context.Context, sessionID, message string) ([]ChatStep, str
 		logger.Error("Failed to load history", "sessionId", sessionID, "error", err)
 	}
 
-	messages := []openai.ChatCompletionMessage{
-		{Role: openai.ChatMessageRoleSystem, Content: assistantPrompt},
+	messages := []json.RawMessage{
+		rawMessage(map[string]any{"role": "system", "content": assistantPrompt}),
 	}
 	messages = append(messages, history...)
-	messages = append(messages, openai.ChatCompletionMessage{
-		Role:    openai.ChatMessageRoleUser,
-		Content: message,
-	})
+	messages = append(messages, rawMessage(map[string]any{"role": "user", "content": message}))
 
 	var steps []ChatStep
 	var finalText string
 
 	// Tool call loop.
 	for {
-		req := openai.ChatCompletionRequest{
-			Model:    llmModel,
-			Messages: messages,
-		}
-		if len(tools) > 0 {
-			req.Tools = tools
-		}
-
-		resp, err := llmClient.CreateChatCompletion(ctx, req)
+		result, err := llm.complete(ctx, messages, tools)
 		if err != nil {
-			return nil, "", fmt.Errorf("LLM request failed: %w", err)
+			return nil, "", err
 		}
-		if len(resp.Choices) == 0 {
+		if result == nil {
 			break
 		}
 
-		choice := resp.Choices[0]
-		messages = append(messages, choice.Message)
+		// Append raw message verbatim — preserves provider-specific fields
+		// like thought_signature so thinking models work correctly.
+		messages = append(messages, result.rawMessage)
 
-		if len(choice.Message.ToolCalls) == 0 {
-			finalText = choice.Message.Content
+		if !result.hasToolCalls {
+			finalText = result.textContent
 			break
 		}
 
-		for _, tc := range choice.Message.ToolCalls {
-			toolName := normalizeToolCallName(tc.Function.Name)
+		for _, tc := range result.toolCalls {
+			toolName := normalizeToolCallName(tc.Name)
 			var args map[string]any
-			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			json.Unmarshal([]byte(tc.Args), &args)
 
 			logger.Info("Tool call received", "tool", toolName, "args", args)
 			steps = append(steps, ChatStep{Type: "tool_call", Name: toolName, Args: args})
@@ -259,23 +364,23 @@ func handleChat(ctx context.Context, sessionID, message string) ([]ChatStep, str
 				resultStr = `{"error":"` + errMsg + `"}`
 				steps = append(steps, ChatStep{Type: "tool_result", Name: toolName, Result: "Error: " + errMsg})
 			} else {
-				result, execErr := executor(ctx, args)
+				res, execErr := executor(ctx, args)
 				if execErr != nil {
 					logger.Error("Tool execution failed", "tool", toolName, "error", execErr)
 					resultStr = `{"error":"` + execErr.Error() + `"}`
 					steps = append(steps, ChatStep{Type: "tool_result", Name: toolName, Result: "Error: " + execErr.Error()})
 				} else {
 					logger.Info("Tool executed successfully", "tool", toolName)
-					resultStr = result
-					steps = append(steps, ChatStep{Type: "tool_result", Name: toolName, Result: result})
+					resultStr = res
+					steps = append(steps, ChatStep{Type: "tool_result", Name: toolName, Result: res})
 				}
 			}
 
-			messages = append(messages, openai.ChatCompletionMessage{
-				Role:       openai.ChatMessageRoleTool,
-				ToolCallID: tc.ID,
-				Content:    resultStr,
-			})
+			messages = append(messages, rawMessage(map[string]any{
+				"role":         "tool",
+				"tool_call_id": tc.ID,
+				"content":      resultStr,
+			}))
 		}
 	}
 
@@ -289,7 +394,7 @@ func handleChat(ctx context.Context, sessionID, message string) ([]ChatStep, str
 	return steps, finalText, nil
 }
 
-func saveHistory(ctx context.Context, sessionID string, messages []openai.ChatCompletionMessage) error {
+func saveHistory(ctx context.Context, sessionID string, messages []json.RawMessage) error {
 	data, err := json.Marshal(messages)
 	if err != nil {
 		return err
@@ -297,7 +402,7 @@ func saveHistory(ctx context.Context, sessionID string, messages []openai.ChatCo
 	return redisClient.Set(ctx, "session:"+sessionID, data, sessionTTL).Err()
 }
 
-func loadHistory(ctx context.Context, sessionID string) ([]openai.ChatCompletionMessage, error) {
+func loadHistory(ctx context.Context, sessionID string) ([]json.RawMessage, error) {
 	data, err := redisClient.Get(ctx, "session:"+sessionID).Bytes()
 	if err != nil {
 		if err == redis.Nil {
@@ -305,7 +410,7 @@ func loadHistory(ctx context.Context, sessionID string) ([]openai.ChatCompletion
 		}
 		return nil, err
 	}
-	var messages []openai.ChatCompletionMessage
+	var messages []json.RawMessage
 	if err := json.Unmarshal(data, &messages); err != nil {
 		// Stale history from old format — start fresh.
 		logger.Warn("Discarding unreadable session history", "sessionId", sessionID)
