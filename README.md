@@ -46,13 +46,25 @@ API_BACKEND=adk-server-python:9090 docker compose --profile python up --build
 
 The `API_BACKEND` env var tells the Nginx proxy which backend container to route `/api/*` traffic to.
 
-See [`go/README.md`](./go/README.md) for full setup, local dev, and troubleshooting.
+See [`go/README.md`](./go/README.md) or [`python/README.md`](./python/README.md) for full setup, local dev, and troubleshooting.
+
+## How it works
+
+The agent follows a **Retrieve → Act → Log** memory cycle powered by ProcIQ:
+
+1. **Retrieve** — before acting, fetch relevant past episodes, patterns, and skills
+2. **Act** — perform the task informed by retrieved context; on error, log and retrieve a known fix before retrying
+3. **Log** — record what was done and learned for future sessions
+
+See [`docs/how-it-works.md`](./docs/how-it-works.md) for the full architecture walkthrough.
 
 ## Repository layout
 
 ```
-go/          Go implementation (adk-server)
-python/      Python implementation (adk-server-python)
-web/         Shared Nginx + chat UI
-.env.example Environment variable reference
+go/             Go implementation (adk-server)
+python/         Python implementation (adk-server-python)
+web/            Shared Nginx + chat UI
+docs/           Architecture and design docs
+.env.example    Environment variable reference
+CONTRIBUTING.md How to contribute
 ```
