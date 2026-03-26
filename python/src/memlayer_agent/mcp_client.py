@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from google.genai import types as genai_types
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
@@ -70,53 +69,25 @@ def _discover_settings() -> dict | None:
     return None
 
 
-def _mcp_type_to_genai(mcp_type: str) -> genai_types.Type:
-    mapping = {
-        "string": genai_types.Type.STRING,
-        "number": genai_types.Type.NUMBER,
-        "integer": genai_types.Type.INTEGER,
-        "boolean": genai_types.Type.BOOLEAN,
-        "array": genai_types.Type.ARRAY,
-        "object": genai_types.Type.OBJECT,
-    }
-    return mapping.get(mcp_type.lower(), genai_types.Type.STRING)
-
-
-def _convert_schema(prop_map: dict) -> genai_types.Schema:
-    schema = genai_types.Schema(type=_mcp_type_to_genai(prop_map.get("type", "string")))
-    if desc := prop_map.get("description"):
-        schema.description = desc
-    if schema.type == genai_types.Type.OBJECT:
-        if props := prop_map.get("properties"):
-            schema.properties = {k: _convert_schema(v) for k, v in props.items()}
-        if req := prop_map.get("required"):
-            schema.required = req
-    if schema.type == genai_types.Type.ARRAY:
-        items = prop_map.get("items")
-        schema.items = _convert_schema(items) if items else genai_types.Schema(type=genai_types.Type.STRING)
-    return schema
-
-
-def _tool_to_declaration(tool: Any) -> genai_types.FunctionDeclaration:
+def _tool_to_openai(tool: Any) -> dict:
     schema = tool.inputSchema if hasattr(tool, "inputSchema") else {}
-    props = schema.get("properties") or {}
-    required = schema.get("required") or []
-    parameters = genai_types.Schema(
-        type=genai_types.Type.OBJECT,
-        properties={k: _convert_schema(v) for k, v in props.items()},
-        required=required,
-    )
-    return genai_types.FunctionDeclaration(
-        name=tool.name,
-        description=tool.description or "",
-        parameters=parameters,
-    )
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description or "",
+            "parameters": {
+                "type": "object",
+                "properties": schema.get("properties") or {},
+                "required": schema.get("required") or [],
+            },
+        },
+    }
 
 
 class MCPServerManager:
     def __init__(self) -> None:
         self._sessions: dict[str, ClientSession] = {}
-        self._tool_to_session: dict[str, ClientSession] = {}
         self._context_managers: list = []
 
     async def load_and_connect(self) -> None:
@@ -170,23 +141,19 @@ class MCPServerManager:
         self._sessions[server_name] = session
         logger.info("Successfully connected to stdio MCP server", server=server_name)
 
-    def list_all_tools(self) -> tuple[list[genai_types.FunctionDeclaration], dict[str, ToolExecutor]]:
-        return [], {}
-
-    async def list_all_tools_async(self) -> tuple[list[genai_types.FunctionDeclaration], dict[str, ToolExecutor]]:
-        decls: list[genai_types.FunctionDeclaration] = []
+    async def list_all_tools_async(self) -> tuple[list[dict], dict[str, ToolExecutor]]:
+        tools: list[dict] = []
         executors: dict[str, ToolExecutor] = {}
         for server_name, session in self._sessions.items():
             try:
                 result = await session.list_tools()
                 for tool in result.tools:
-                    decl = _tool_to_declaration(tool)
-                    decls.append(decl)
+                    tools.append(_tool_to_openai(tool))
                     executors[tool.name] = self._make_executor(session, tool.name)
                 logger.info("MCP tools registered", server=server_name, count=len(result.tools))
             except Exception as exc:
                 logger.error("Failed to list MCP tools", server=server_name, error=str(exc))
-        return decls, executors
+        return tools, executors
 
     def _make_executor(self, session: ClientSession, tool_name: str) -> ToolExecutor:
         async def executor(args: dict[str, Any]) -> str:

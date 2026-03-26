@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"google.golang.org/genai"
+	openai "github.com/sashabaranov/go-openai"
 )
 
 const (
@@ -64,61 +64,70 @@ type ChatResponse struct {
 
 type ToolExecutor func(ctx context.Context, args map[string]any) (string, error)
 
-// PersistedContent mimics genai.Content for JSON serialization
-type PersistedContent struct {
-	Role  string          `json:"role"`
-	Parts []PersistedPart `json:"parts"`
-}
-
-type PersistedPart struct {
-	Type             string                 `json:"type"` // "text", "function_call", "function_response"
-	Text             string                 `json:"text,omitempty"`
-	FunctionCall     *PersistedFunctionCall `json:"function_call,omitempty"`
-	FunctionResponse *PersistedFunctionResp `json:"function_response,omitempty"`
-}
-
-type PersistedFunctionCall struct {
-	Name string         `json:"name"`
-	Args map[string]any `json:"args"`
-}
-
-type PersistedFunctionResp struct {
-	Name     string         `json:"name"`
-	Response map[string]any `json:"response"`
-}
-
 var (
 	logger      *slog.Logger
 	redisClient *redis.Client
 	mcpManager  *MCPServerManager
+	llmClient   *openai.Client
+	llmModel    string
 )
 
 func init() {
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, nil))
 }
 
+// resolveClient builds the OpenAI-compatible client from environment variables.
+// Supports Gemini, OpenAI, Ollama, and any other OpenAI-protocol provider.
+func resolveClient() (*openai.Client, string, error) {
+	openAIKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	googleKey := firstNonEmpty(
+		strings.TrimSpace(os.Getenv("GOOGLE_API_KEY")),
+		strings.TrimSpace(os.Getenv("GEMINI_API_KEY")),
+	)
+	baseURL := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
+	model := strings.TrimSpace(os.Getenv("MODEL"))
+
+	var apiKey string
+	if openAIKey != "" {
+		apiKey = openAIKey
+		if model == "" {
+			model = "gpt-4o-mini"
+		}
+	} else if googleKey != "" {
+		apiKey = googleKey
+		if baseURL == "" {
+			baseURL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+		}
+		if model == "" {
+			model = "gemini-2.0-flash"
+		}
+	} else {
+		return nil, "", fmt.Errorf("OPENAI_API_KEY or GOOGLE_API_KEY is required")
+	}
+
+	cfg := openai.DefaultConfig(apiKey)
+	if baseURL != "" {
+		cfg.BaseURL = baseURL
+	}
+	return openai.NewClientWithConfig(cfg), model, nil
+}
+
 func main() {
 	redisAddr := envOrDefault("REDIS_ADDR", "localhost:6379")
-
-	redisClient = redis.NewClient(&redis.Options{
-		Addr: redisAddr,
-	})
-
+	redisClient = redis.NewClient(&redis.Options{Addr: redisAddr})
 	if err := redisClient.Ping(context.Background()).Err(); err != nil {
 		logger.Error("Failed to connect to Redis", "error", err)
 	}
 
-	apiKey := os.Getenv("GEMINI_API_KEY")
-	if apiKey == "" {
-		apiKey = os.Getenv("GOOGLE_API_KEY")
-	}
-	if apiKey == "" {
-		logger.Error("GEMINI_API_KEY or GOOGLE_API_KEY is required")
+	var err error
+	llmClient, llmModel, err = resolveClient()
+	if err != nil {
+		logger.Error(err.Error())
 		os.Exit(1)
 	}
+	logger.Info("LLM client configured", "model", llmModel)
 
 	mcpManager = NewMCPServerManager(logger)
-	// Use a background context with timeout for initial connection
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	if err := mcpManager.LoadAndConnect(ctx); err != nil {
@@ -130,7 +139,6 @@ func main() {
 		if r.Method == "OPTIONS" {
 			return
 		}
-
 		if r.Method != "POST" {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -138,25 +146,21 @@ func main() {
 
 		var req ChatRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			logger.Error("Invalid request body", "error", err)
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
 			return
 		}
-
 		if req.SessionID == "" {
 			req.SessionID = "default"
 		}
 
 		logger.Info("Received chat request", "sessionId", req.SessionID)
 
-		steps, resp, err := handleChat(r.Context(), req.SessionID, req.Message, apiKey)
-
+		steps, resp, err := handleChat(r.Context(), req.SessionID, req.Message)
 		if err != nil {
 			logger.Error("Error handling chat", "error", err, "sessionId", req.SessionID)
 			json.NewEncoder(w).Encode(ChatResponse{Error: err.Error()})
 			return
 		}
-
 		json.NewEncoder(w).Encode(ChatResponse{Response: resp, Steps: steps})
 	})
 
@@ -167,318 +171,148 @@ func main() {
 	}
 }
 
-func handleChat(ctx context.Context, sessionID, message, apiKey string) ([]ChatStep, string, error) {
+func handleChat(ctx context.Context, sessionID, message string) ([]ChatStep, string, error) {
 	startedAt := time.Now()
-	logger.Info("handleChat started", "sessionId", sessionID, "message_chars", len(strings.TrimSpace(message)))
 
-	client, err := genai.NewClient(ctx, &genai.ClientConfig{
-		APIKey:  apiKey,
-		Backend: genai.BackendGeminiAPI,
-	})
-	if err != nil {
-		logger.Error("Failed to create genai client", "sessionId", sessionID, "error", err)
-		return nil, "", fmt.Errorf("failed to create genai client: %w", err)
-	}
-
-	modelName := envOrDefault("MODEL", "gemini-3-flash-preview")
-	config := &genai.GenerateContentConfig{
-		SystemInstruction: &genai.Content{
-			Parts: []*genai.Part{
-				{Text: assistantPrompt},
-			},
-		},
-	}
-
-	funcDecls := make([]*genai.FunctionDeclaration, 0)
+	// Build tool list and executors.
+	var tools []openai.Tool
 	toolExecutors := make(map[string]ToolExecutor)
-	toolDisplayNames := make(map[string]string)
 
-	// Register remote MCP tools if available.
 	if mcpManager != nil {
-		mcpDecls, mcpExecutors, err := mcpManager.ListAllTools(ctx)
+		mcpTools, mcpExecutors, err := mcpManager.ListAllTools(ctx)
 		if err != nil {
 			logger.Error("Failed to list MCP tools", "sessionId", sessionID, "error", err)
 		} else {
-			funcDecls = append(funcDecls, mcpDecls...)
-			for name, executor := range mcpExecutors {
-				toolExecutors[name] = executor
-				if _, exists := toolDisplayNames[name]; !exists {
-					toolDisplayNames[name] = name
-				}
+			tools = append(tools, mcpTools...)
+			for k, v := range mcpExecutors {
+				toolExecutors[k] = v
 			}
-			logger.Info("MCP tools registered", "sessionId", sessionID, "count", len(mcpDecls))
+			logger.Info("MCP tools registered", "sessionId", sessionID, "count", len(mcpTools))
 		}
 	}
 
-	// Register Finnhub example tools when FINNHUB_API_KEY is set.
-	// See finnhub_tools.go for the implementation and as a pattern for adding
-	// your own local tool integrations.
 	if os.Getenv("FINNHUB_API_KEY") != "" {
-		finnhubDecls, finnhubExecutors := buildFinnhubToolset()
-		funcDecls = append(funcDecls, finnhubDecls...)
-		for name, executor := range finnhubExecutors {
-			toolExecutors[name] = executor
-			if _, exists := toolDisplayNames[name]; !exists {
-				toolDisplayNames[name] = name
-			}
+		finnhubTools, finnhubExecutors := buildFinnhubToolset()
+		tools = append(tools, finnhubTools...)
+		for k, v := range finnhubExecutors {
+			toolExecutors[k] = v
 		}
-		logger.Info("Finnhub example tools registered", "sessionId", sessionID, "count", len(finnhubDecls))
+		logger.Info("Finnhub example tools registered", "sessionId", sessionID, "count", len(finnhubTools))
 	}
 
-	// Attach tool declarations to model config so function-calling is enabled.
-	if len(funcDecls) > 0 {
-		config.Tools = []*genai.Tool{{FunctionDeclarations: funcDecls}}
-	}
-	logger.Info("Chat tools configured", "sessionId", sessionID, "tool_count", len(funcDecls))
-
+	// Load history and build message list.
 	history, err := loadHistory(ctx, sessionID)
 	if err != nil {
 		logger.Error("Failed to load history", "sessionId", sessionID, "error", err)
 	}
-	logger.Info("Chat history loaded", "sessionId", sessionID, "history_items", len(history))
 
-	cs, err := client.Chats.Create(ctx, modelName, config, history)
-	if err != nil {
-		logger.Error("Failed to create chat session", "sessionId", sessionID, "error", err)
-		return nil, "", fmt.Errorf("failed to create chat session: %w", err)
+	messages := []openai.ChatCompletionMessage{
+		{Role: openai.ChatMessageRoleSystem, Content: assistantPrompt},
 	}
+	messages = append(messages, history...)
+	messages = append(messages, openai.ChatCompletionMessage{
+		Role:    openai.ChatMessageRoleUser,
+		Content: message,
+	})
 
-	resp, err := cs.SendMessage(ctx, genai.Part{Text: message})
-	if err != nil {
-		logger.Error("Initial model message failed", "sessionId", sessionID, "error", err)
-		return nil, "", err
-	}
-
-	steps, fullResponse, err := processResponse(ctx, cs, resp, toolExecutors, toolDisplayNames)
-	if err != nil {
-		logger.Error("processResponse failed", "sessionId", sessionID, "error", err)
-		return nil, "", err
-	}
-
-	if err := saveHistory(ctx, sessionID, cs.History(false)); err != nil {
-		logger.Error("Failed to save session history", "sessionId", sessionID, "error", err)
-	}
-	logger.Info("handleChat completed", "sessionId", sessionID, "steps", len(steps), "response_chars", len(strings.TrimSpace(fullResponse)), "duration_ms", time.Since(startedAt).Milliseconds())
-
-	return steps, fullResponse, nil
-}
-
-func processResponse(
-	ctx context.Context,
-	cs *genai.Chat,
-	resp *genai.GenerateContentResponse,
-	toolExecutors map[string]ToolExecutor,
-	toolDisplayNames map[string]string,
-) ([]ChatStep, string, error) {
-	startedAt := time.Now()
-	var fullResponse strings.Builder
 	var steps []ChatStep
-	toolRoundTrips := 0
+	var finalText string
 
+	// Tool call loop.
 	for {
-		nextResp, handledToolCall, err := processModelTurn(ctx, cs, resp, toolExecutors, toolDisplayNames, &fullResponse, &steps)
-		if err != nil {
-			return nil, "", err
+		req := openai.ChatCompletionRequest{
+			Model:    llmModel,
+			Messages: messages,
 		}
-		if !handledToolCall {
+		if len(tools) > 0 {
+			req.Tools = tools
+		}
+
+		resp, err := llmClient.CreateChatCompletion(ctx, req)
+		if err != nil {
+			return nil, "", fmt.Errorf("LLM request failed: %w", err)
+		}
+		if len(resp.Choices) == 0 {
 			break
 		}
-		toolRoundTrips++
-		resp = nextResp
-	}
 
-	logger.Info("processResponse completed", "steps", len(steps), "tool_round_trips", toolRoundTrips, "response_chars", len(strings.TrimSpace(fullResponse.String())), "duration_ms", time.Since(startedAt).Milliseconds())
-	return steps, fullResponse.String(), nil
-}
+		choice := resp.Choices[0]
+		messages = append(messages, choice.Message)
 
-func processModelTurn(
-	ctx context.Context,
-	cs *genai.Chat,
-	resp *genai.GenerateContentResponse,
-	toolExecutors map[string]ToolExecutor,
-	toolDisplayNames map[string]string,
-	fullResponse *strings.Builder,
-	steps *[]ChatStep,
-) (*genai.GenerateContentResponse, bool, error) {
-	for _, cand := range resp.Candidates {
-		if cand.Content == nil {
-			continue
+		if len(choice.Message.ToolCalls) == 0 {
+			finalText = choice.Message.Content
+			break
 		}
-		for _, part := range cand.Content.Parts {
-			if part.Text != "" {
-				fullResponse.WriteString(part.Text)
-			}
-			if part.FunctionCall != nil {
-				nextResp, err := handleFunctionCallPart(ctx, cs, part.FunctionCall, toolExecutors, toolDisplayNames, steps)
-				if err != nil {
-					return nil, false, err
-				}
-				return nextResp, true, nil
-			}
-		}
-	}
-	return nil, false, nil
-}
 
-func handleFunctionCallPart(
-	ctx context.Context,
-	cs *genai.Chat,
-	fc *genai.FunctionCall,
-	toolExecutors map[string]ToolExecutor,
-	toolDisplayNames map[string]string,
-	steps *[]ChatStep,
-) (*genai.GenerateContentResponse, error) {
-	logger.Info("Tool call received", "tool", fc.Name, "args", fc.Args)
-	toolName := normalizeToolCallName(fc.Name)
-	displayName := toolDisplayNames[toolName]
-	if displayName == "" {
-		displayName = toolName
-	}
+		for _, tc := range choice.Message.ToolCalls {
+			toolName := normalizeToolCallName(tc.Function.Name)
+			var args map[string]any
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
 
-	*steps = append(*steps, ChatStep{
-		Type: "tool_call",
-		Name: displayName,
-		Args: fc.Args,
-	})
+			logger.Info("Tool call received", "tool", toolName, "args", args)
+			steps = append(steps, ChatStep{Type: "tool_call", Name: toolName, Args: args})
 
-	executor, ok := toolExecutors[toolName]
-	if !ok {
-		toolErr := fmt.Errorf("tool %q is not available", toolName)
-		*steps = append(*steps, ChatStep{
-			Type:   "tool_result",
-			Name:   displayName,
-			Result: "Error: " + toolErr.Error(),
-		})
-		return sendToolResponse(ctx, cs, fc.Name, map[string]any{"error": toolErr.Error()}, "failed to send tool error response")
-	}
-
-	result, err := executor(ctx, fc.Args)
-	if err != nil {
-		logger.Error("Tool execution failed", "tool", displayName, "error", err)
-		*steps = append(*steps, ChatStep{
-			Type:   "tool_result",
-			Name:   displayName,
-			Result: "Error: " + err.Error(),
-		})
-		return sendToolResponse(ctx, cs, fc.Name, map[string]any{"error": err.Error()}, "failed to send tool response")
-	}
-
-	logger.Info("Tool executed successfully", "tool", displayName)
-	*steps = append(*steps, ChatStep{
-		Type:   "tool_result",
-		Name:   displayName,
-		Result: result,
-	})
-
-	return sendToolResponse(ctx, cs, fc.Name, toolResultResponsePayload(result), "failed to send tool response")
-}
-
-func sendToolResponse(
-	ctx context.Context,
-	cs *genai.Chat,
-	functionName string,
-	responsePayload map[string]any,
-	wrapErrMessage string,
-) (*genai.GenerateContentResponse, error) {
-	resp, err := cs.SendMessage(ctx, genai.Part{
-		FunctionResponse: &genai.FunctionResponse{
-			Name:     functionName,
-			Response: responsePayload,
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", wrapErrMessage, err)
-	}
-	return resp, nil
-}
-
-func toolResultResponsePayload(result string) map[string]any {
-	var jsonResult map[string]any
-	if err := json.Unmarshal([]byte(result), &jsonResult); err == nil {
-		return jsonResult
-	}
-	return map[string]any{"result": result}
-}
-
-// --- Persistence Helpers ---
-
-func saveHistory(ctx context.Context, sessionID string, history []*genai.Content) error {
-	var persisted []*PersistedContent
-	for _, c := range history {
-		pc := &PersistedContent{Role: c.Role}
-		for _, p := range c.Parts {
-			pp := PersistedPart{}
-			if p.Text != "" {
-				pp.Type = "text"
-				pp.Text = p.Text
-			} else if p.FunctionCall != nil {
-				pp.Type = "function_call"
-				pp.FunctionCall = &PersistedFunctionCall{Name: p.FunctionCall.Name, Args: p.FunctionCall.Args}
-			} else if p.FunctionResponse != nil {
-				pp.Type = "function_response"
-				pp.FunctionResponse = &PersistedFunctionResp{Name: p.FunctionResponse.Name, Response: p.FunctionResponse.Response}
+			var resultStr string
+			executor, ok := toolExecutors[toolName]
+			if !ok {
+				errMsg := fmt.Sprintf("tool %q is not available", toolName)
+				resultStr = `{"error":"` + errMsg + `"}`
+				steps = append(steps, ChatStep{Type: "tool_result", Name: toolName, Result: "Error: " + errMsg})
 			} else {
-				continue
+				result, execErr := executor(ctx, args)
+				if execErr != nil {
+					logger.Error("Tool execution failed", "tool", toolName, "error", execErr)
+					resultStr = `{"error":"` + execErr.Error() + `"}`
+					steps = append(steps, ChatStep{Type: "tool_result", Name: toolName, Result: "Error: " + execErr.Error()})
+				} else {
+					logger.Info("Tool executed successfully", "tool", toolName)
+					resultStr = result
+					steps = append(steps, ChatStep{Type: "tool_result", Name: toolName, Result: result})
+				}
 			}
-			pc.Parts = append(pc.Parts, pp)
+
+			messages = append(messages, openai.ChatCompletionMessage{
+				Role:       openai.ChatMessageRoleTool,
+				ToolCallID: tc.ID,
+				Content:    resultStr,
+			})
 		}
-		persisted = append(persisted, pc)
 	}
 
-	data, err := json.Marshal(persisted)
+	// Save history (skip system message).
+	if err := saveHistory(ctx, sessionID, messages[1:]); err != nil {
+		logger.Error("Failed to save history", "sessionId", sessionID, "error", err)
+	}
+
+	logger.Info("handleChat completed", "sessionId", sessionID, "steps", len(steps),
+		"response_chars", len(strings.TrimSpace(finalText)), "duration_ms", time.Since(startedAt).Milliseconds())
+	return steps, finalText, nil
+}
+
+func saveHistory(ctx context.Context, sessionID string, messages []openai.ChatCompletionMessage) error {
+	data, err := json.Marshal(messages)
 	if err != nil {
 		return err
 	}
-
 	return redisClient.Set(ctx, "session:"+sessionID, data, sessionTTL).Err()
 }
 
-func loadHistory(ctx context.Context, sessionID string) ([]*genai.Content, error) {
+func loadHistory(ctx context.Context, sessionID string) ([]openai.ChatCompletionMessage, error) {
 	data, err := redisClient.Get(ctx, "session:"+sessionID).Bytes()
 	if err != nil {
 		if err == redis.Nil {
-			return nil, nil // No history found
+			return nil, nil
 		}
 		return nil, err
 	}
-
-	var persisted []*PersistedContent
-	if err := json.Unmarshal(data, &persisted); err != nil {
-		return nil, err
+	var messages []openai.ChatCompletionMessage
+	if err := json.Unmarshal(data, &messages); err != nil {
+		// Stale history from old format — start fresh.
+		logger.Warn("Discarding unreadable session history", "sessionId", sessionID)
+		return nil, nil
 	}
-
-	var history []*genai.Content
-	for _, pc := range persisted {
-		role := pc.Role
-		if role == "" {
-			role = "user"
-		}
-		c := &genai.Content{Role: role}
-		for _, pp := range pc.Parts {
-			part := &genai.Part{}
-			switch pp.Type {
-			case "text":
-				part.Text = pp.Text
-			case "function_call":
-				if pp.FunctionCall != nil {
-					part.FunctionCall = &genai.FunctionCall{Name: pp.FunctionCall.Name, Args: pp.FunctionCall.Args}
-				}
-			case "function_response":
-				if pp.FunctionResponse != nil {
-					part.FunctionResponse = &genai.FunctionResponse{Name: pp.FunctionResponse.Name, Response: pp.FunctionResponse.Response}
-				}
-			}
-			if part.Text != "" || part.FunctionCall != nil || part.FunctionResponse != nil {
-				c.Parts = append(c.Parts, part)
-			}
-		}
-		history = append(history, c)
-	}
-
-	return history, nil
+	return messages, nil
 }
-
-// --- Utils ---
 
 func enableCors(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")

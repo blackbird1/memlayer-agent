@@ -54,7 +54,7 @@ Browser / curl
      │    ├─ ProcIQ MCP tools  (always — memory layer)
      │    └─ Local tools       (if env key present, e.g. FINNHUB_API_KEY)
      │
-     ├─ Send message + history → Gemini
+     ├─ Send message + history → LLM (OpenAI protocol)
      │
      └─ Tool call loop:
           ├─ Model returns function_call → execute tool → send result back
@@ -69,7 +69,7 @@ Browser / curl
 
 | Component | Role |
 |-----------|------|
-| **Gemini** | Language model — reasons, calls tools, generates responses |
+| **LLM** | Language model via OpenAI protocol — Gemini (default), OpenAI, Ollama, or any compatible provider |
 | **ProcIQ MCP** | Memory layer — stores and retrieves episodes, notes, patterns, skills |
 | **Redis** | Short-term session store — chat history per `sessionId` (30-min TTL) |
 | **Nginx** | Reverse proxy — serves the static UI and routes `/api/*` to the backend |

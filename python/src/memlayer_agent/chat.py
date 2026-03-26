@@ -5,8 +5,7 @@ from typing import Any
 
 import redis.asyncio as aioredis
 import structlog
-from google import genai
-from google.genai import types as genai_types
+from openai import AsyncOpenAI
 
 from .mcp_client import MCPServerManager
 from .session import load_history, save_history
@@ -40,22 +39,29 @@ Keep responses short, structured, and grounded in tool results when tools are us
 Always produce a final text response to the user after completing tool calls — never end a turn with only tool calls and no message."""
 
 
-@dataclass
-class ChatStep:
-    type: str  # "tool_call" or "tool_result"
-    name: str = ""
-    args: dict[str, Any] = field(default_factory=dict)
-    result: str = ""
+def _resolve_client() -> tuple[AsyncOpenAI, str]:
+    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    google_key = (os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY") or "").strip()
+    base_url = os.environ.get("OPENAI_BASE_URL", "").strip()
+    model = os.environ.get("MODEL", "").strip()
 
+    if openai_key:
+        api_key = openai_key
+        if not model:
+            model = "gpt-4o-mini"
+    elif google_key:
+        api_key = google_key
+        if not base_url:
+            base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+        if not model:
+            model = "gemini-2.0-flash"
+    else:
+        raise ValueError("OPENAI_API_KEY or GOOGLE_API_KEY is required")
 
-def _tool_result_payload(result: str) -> dict[str, Any]:
-    try:
-        parsed = json.loads(result)
-        if isinstance(parsed, dict):
-            return parsed
-    except (json.JSONDecodeError, ValueError):
-        pass
-    return {"result": result}
+    kwargs: dict[str, Any] = {"api_key": api_key}
+    if base_url:
+        kwargs["base_url"] = base_url
+    return AsyncOpenAI(**kwargs), model
 
 
 def _normalize_tool_name(name: str) -> str:
@@ -65,29 +71,31 @@ def _normalize_tool_name(name: str) -> str:
     return name
 
 
+@dataclass
+class ChatStep:
+    type: str  # "tool_call" or "tool_result"
+    name: str = ""
+    args: dict[str, Any] = field(default_factory=dict)
+    result: str = ""
+
+
 async def handle_chat(
     session_id: str,
     message: str,
     redis_client: aioredis.Redis,
     mcp_manager: MCPServerManager,
 ) -> tuple[list[ChatStep], str]:
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY", "")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY or GOOGLE_API_KEY is required")
+    client, model = _resolve_client()
 
-    model_name = os.environ.get("MODEL", "gemini-2.0-flash").strip() or "gemini-2.0-flash"
-
-    client = genai.Client(api_key=api_key)
-
-    func_decls: list[genai_types.FunctionDeclaration] = []
+    tools: list[dict] = []
     tool_executors: dict[str, Any] = {}
 
     # Register MCP tools
     try:
-        mcp_decls, mcp_executors = await mcp_manager.list_all_tools_async()
-        func_decls.extend(mcp_decls)
+        mcp_tools, mcp_executors = await mcp_manager.list_all_tools_async()
+        tools.extend(mcp_tools)
         tool_executors.update(mcp_executors)
-        logger.info("MCP tools registered", session_id=session_id, count=len(mcp_decls))
+        logger.info("MCP tools registered", session_id=session_id, count=len(mcp_tools))
     except Exception as exc:
         logger.error("Failed to list MCP tools", session_id=session_id, error=str(exc))
 
@@ -96,115 +104,75 @@ async def handle_chat(
     # your own local tool integrations.
     if os.environ.get("FINNHUB_API_KEY"):
         from .finnhub_tools import TOOL_DECLARATIONS as FINNHUB_DECLS, TOOL_EXECUTORS as FINNHUB_EXECUTORS
-        func_decls.extend(FINNHUB_DECLS)
+        tools.extend(FINNHUB_DECLS)
         tool_executors.update(FINNHUB_EXECUTORS)
         logger.info("Finnhub example tools registered", session_id=session_id, count=len(FINNHUB_DECLS))
-
-    config = genai_types.GenerateContentConfig(
-        system_instruction=ASSISTANT_PROMPT,
-        tools=[genai_types.Tool(function_declarations=func_decls)] if func_decls else None,
-    )
 
     history = await load_history(redis_client, session_id)
     logger.info("Chat history loaded", session_id=session_id, history_items=len(history))
 
-    chat = client.aio.chats.create(model=model_name, config=config, history=history)
-    resp = await chat.send_message(message)
+    messages: list[dict] = [{"role": "system", "content": ASSISTANT_PROMPT}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": message})
 
-    steps, full_response = await _process_response(resp, chat, tool_executors)
+    steps: list[ChatStep] = []
+    final_text = ""
 
-    await save_history(redis_client, session_id, chat.get_history())
+    # Tool call loop
+    while True:
+        kwargs: dict[str, Any] = {"model": model, "messages": messages}
+        if tools:
+            kwargs["tools"] = tools
+
+        resp = await client.chat.completions.create(**kwargs)
+        if not resp.choices:
+            break
+
+        choice = resp.choices[0]
+        msg = choice.message
+        messages.append(msg.model_dump(exclude_unset=False, exclude_none=True))
+
+        if not msg.tool_calls:
+            final_text = msg.content or ""
+            break
+
+        for tc in msg.tool_calls:
+            tool_name = _normalize_tool_name(tc.function.name)
+            try:
+                args = json.loads(tc.function.arguments)
+            except (json.JSONDecodeError, ValueError):
+                args = {}
+
+            logger.info("Tool call received", tool=tool_name, args=args)
+            steps.append(ChatStep(type="tool_call", name=tool_name, args=args))
+
+            executor = tool_executors.get(tool_name)
+            if executor is None:
+                error_msg = f"tool {tool_name!r} is not available"
+                result_str = json.dumps({"error": error_msg})
+                steps.append(ChatStep(type="tool_result", name=tool_name, result=f"Error: {error_msg}"))
+            else:
+                try:
+                    result_str = await executor(args)
+                    logger.info("Tool executed successfully", tool=tool_name)
+                    steps.append(ChatStep(type="tool_result", name=tool_name, result=result_str))
+                except Exception as exc:
+                    logger.error("Tool execution failed", tool=tool_name, error=str(exc))
+                    result_str = json.dumps({"error": str(exc)})
+                    steps.append(ChatStep(type="tool_result", name=tool_name, result=f"Error: {exc}"))
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result_str,
+            })
+
+    # Save history (skip system message)
+    await save_history(redis_client, session_id, messages[1:])
     logger.info(
         "handleChat completed",
         session_id=session_id,
         steps=len(steps),
-        response_chars=len(full_response.strip()),
+        response_chars=len(final_text.strip()),
     )
-    return steps, full_response
-
-
-async def _process_response(
-    resp: genai_types.GenerateContentResponse,
-    chat: Any,
-    tool_executors: dict[str, Any],
-) -> tuple[list[ChatStep], str]:
-    steps: list[ChatStep] = []
-    full_response_parts: list[str] = []
-    tool_round_trips = 0
-
-    while True:
-        next_resp, handled = await _process_model_turn(
-            resp, chat, tool_executors, steps, full_response_parts
-        )
-        if not handled:
-            break
-        tool_round_trips += 1
-        resp = next_resp
-
-    logger.info("processResponse completed", steps=len(steps), tool_round_trips=tool_round_trips)
-    return steps, "".join(full_response_parts)
-
-
-async def _process_model_turn(
-    resp: genai_types.GenerateContentResponse,
-    chat: Any,
-    tool_executors: dict[str, Any],
-    steps: list[ChatStep],
-    full_response_parts: list[str],
-) -> tuple[Any, bool]:
-    for candidate in resp.candidates or []:
-        if not candidate.content:
-            continue
-        for part in candidate.content.parts or []:
-            if part.text:
-                full_response_parts.append(part.text)
-            if part.function_call:
-                next_resp = await _handle_function_call(
-                    part.function_call, chat, tool_executors, steps
-                )
-                return next_resp, True
-    return None, False
-
-
-async def _handle_function_call(
-    fc: genai_types.FunctionCall,
-    chat: Any,
-    tool_executors: dict[str, Any],
-    steps: list[ChatStep],
-) -> genai_types.GenerateContentResponse:
-    tool_name = _normalize_tool_name(fc.name)
-    tool_args = dict(fc.args or {})
-    logger.info("Tool call received", tool=fc.name, tool_args=tool_args)
-
-    steps.append(ChatStep(type="tool_call", name=tool_name, args=tool_args))
-
-    executor = tool_executors.get(tool_name)
-    if executor is None:
-        error_msg = f"tool {tool_name!r} is not available"
-        steps.append(ChatStep(type="tool_result", name=tool_name, result=f"Error: {error_msg}"))
-        return await _send_tool_response(chat, fc.name, {"error": error_msg})
-
-    try:
-        result = await executor(tool_args)
-        logger.info("Tool executed successfully", tool=tool_name)
-        steps.append(ChatStep(type="tool_result", name=tool_name, result=result))
-        return await _send_tool_response(chat, fc.name, _tool_result_payload(result))
-    except Exception as exc:
-        logger.error("Tool execution failed", tool=tool_name, error=str(exc))
-        steps.append(ChatStep(type="tool_result", name=tool_name, result=f"Error: {exc}"))
-        return await _send_tool_response(chat, fc.name, {"error": str(exc)})
-
-
-async def _send_tool_response(
-    chat: Any,
-    function_name: str,
-    payload: dict[str, Any],
-) -> genai_types.GenerateContentResponse:
-    return await chat.send_message(
-        genai_types.Part(
-            function_response=genai_types.FunctionResponse(
-                name=function_name,
-                response=payload,
-            )
-        )
-    )
+    return steps, final_text

@@ -10,7 +10,6 @@ from urllib.parse import quote
 
 import httpx
 import structlog
-from google.genai import types as genai_types
 
 logger = structlog.get_logger(__name__)
 
@@ -179,91 +178,33 @@ async def _get_price_target(args: dict[str, Any]) -> str:
 
 # --- Registry ---
 
-_SYMBOL_PARAM = {
-    "symbol": genai_types.Schema(
-        type=genai_types.Type.STRING,
-        description="Ticker symbol (e.g. AAPL, MSFT).",
-    )
-}
+def _symbol_params() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "symbol": {"type": "string", "description": "Ticker symbol (e.g. AAPL, MSFT)."},
+        },
+        "required": ["symbol"],
+    }
+
+
+def _tool(name: str, description: str, parameters: dict) -> dict:
+    return {"type": "function", "function": {"name": name, "description": description, "parameters": parameters}}
+
 
 TOOL_DECLARATIONS = [
-    genai_types.FunctionDeclaration(
-        name="finnhub_search_tickers",
-        description="Search for stock tickers by company name or symbol.",
-        parameters=genai_types.Schema(
-            type=genai_types.Type.OBJECT,
-            properties={
-                "query": genai_types.Schema(
-                    type=genai_types.Type.STRING,
-                    description="Company name or ticker symbol to search for.",
-                )
-            },
-            required=["query"],
-        ),
-    ),
-    genai_types.FunctionDeclaration(
-        name="finnhub_get_quote",
-        description="Fetch the current stock price and intraday quote data.",
-        parameters=genai_types.Schema(
-            type=genai_types.Type.OBJECT,
-            properties=_SYMBOL_PARAM,
-            required=["symbol"],
-        ),
-    ),
-    genai_types.FunctionDeclaration(
-        name="finnhub_get_company_profile",
-        description="Fetch company profile: name, exchange, industry, market cap, IPO date, website.",
-        parameters=genai_types.Schema(
-            type=genai_types.Type.OBJECT,
-            properties=_SYMBOL_PARAM,
-            required=["symbol"],
-        ),
-    ),
-    genai_types.FunctionDeclaration(
-        name="finnhub_get_company_news",
-        description="Fetch the latest company news headlines (last 7 days, up to 5 articles).",
-        parameters=genai_types.Schema(
-            type=genai_types.Type.OBJECT,
-            properties=_SYMBOL_PARAM,
-            required=["symbol"],
-        ),
-    ),
-    genai_types.FunctionDeclaration(
-        name="finnhub_get_earnings_calendar",
-        description="Fetch upcoming or recent earnings dates and EPS/revenue estimates for a symbol (next 90 days).",
-        parameters=genai_types.Schema(
-            type=genai_types.Type.OBJECT,
-            properties=_SYMBOL_PARAM,
-            required=["symbol"],
-        ),
-    ),
-    genai_types.FunctionDeclaration(
-        name="finnhub_get_analyst_recommendations",
-        description="Fetch the latest analyst buy/hold/sell recommendation consensus.",
-        parameters=genai_types.Schema(
-            type=genai_types.Type.OBJECT,
-            properties=_SYMBOL_PARAM,
-            required=["symbol"],
-        ),
-    ),
-    genai_types.FunctionDeclaration(
-        name="finnhub_get_insider_sentiment",
-        description="Fetch insider trading sentiment (MSPR score and net share change) for the last 3 months.",
-        parameters=genai_types.Schema(
-            type=genai_types.Type.OBJECT,
-            properties=_SYMBOL_PARAM,
-            required=["symbol"],
-        ),
-    ),
-    genai_types.FunctionDeclaration(
-        name="finnhub_get_price_target",
-        description="Fetch analyst consensus price target: high, low, mean, and median.",
-        parameters=genai_types.Schema(
-            type=genai_types.Type.OBJECT,
-            properties=_SYMBOL_PARAM,
-            required=["symbol"],
-        ),
-    ),
+    _tool("finnhub_search_tickers", "Search for stock tickers by company name or symbol.", {
+        "type": "object",
+        "properties": {"query": {"type": "string", "description": "Company name or ticker symbol to search for."}},
+        "required": ["query"],
+    }),
+    _tool("finnhub_get_quote", "Fetch the current stock price and intraday quote data.", _symbol_params()),
+    _tool("finnhub_get_company_profile", "Fetch company profile: name, exchange, industry, market cap, IPO date, website.", _symbol_params()),
+    _tool("finnhub_get_company_news", "Fetch the latest company news headlines (last 7 days, up to 5 articles).", _symbol_params()),
+    _tool("finnhub_get_earnings_calendar", "Fetch upcoming or recent earnings dates and EPS/revenue estimates for a symbol (next 90 days).", _symbol_params()),
+    _tool("finnhub_get_analyst_recommendations", "Fetch the latest analyst buy/hold/sell recommendation consensus.", _symbol_params()),
+    _tool("finnhub_get_insider_sentiment", "Fetch insider trading sentiment (MSPR score and net share change) for the last 3 months.", _symbol_params()),
+    _tool("finnhub_get_price_target", "Fetch analyst consensus price target: high, low, mean, and median.", _symbol_params()),
 ]
 
 TOOL_EXECUTORS: dict[str, ToolExecutor] = {

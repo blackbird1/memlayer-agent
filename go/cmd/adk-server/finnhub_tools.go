@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"google.golang.org/genai"
+	openai "github.com/sashabaranov/go-openai"
 )
 
 const finnhubBaseURL = "https://finnhub.io/api/v1"
@@ -138,88 +138,64 @@ func requireSymbol(args map[string]any) (string, error) {
 
 // --- Tool Registry ---
 
-func listFinnhubToolNames() []string {
-	return []string{
-		"finnhub_search_tickers",
-		"finnhub_get_quote",
-		"finnhub_get_company_profile",
-		"finnhub_get_company_news",
-		"finnhub_get_earnings_calendar",
-		"finnhub_get_analyst_recommendations",
-		"finnhub_get_insider_sentiment",
-		"finnhub_get_price_target",
+
+func symbolParams() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"symbol": map[string]any{
+				"type":        "string",
+				"description": "Ticker symbol (e.g. AAPL, MSFT).",
+			},
+		},
+		"required": []string{"symbol"},
 	}
 }
 
-func buildFinnhubToolset() ([]*genai.FunctionDeclaration, map[string]ToolExecutor) {
-	symbolParam := map[string]*genai.Schema{
-		"symbol": {
-			Type:        genai.TypeString,
-			Description: "Ticker symbol (e.g. AAPL, MSFT).",
-		},
+func buildFinnhubToolset() ([]openai.Tool, map[string]ToolExecutor) {
+	tool := func(name, description string, params map[string]any) openai.Tool {
+		return openai.Tool{
+			Type: openai.ToolTypeFunction,
+			Function: &openai.FunctionDefinition{
+				Name:        name,
+				Description: description,
+				Parameters:  params,
+			},
+		}
 	}
 
-	decls := []*genai.FunctionDeclaration{
-		{
-			Name:        "finnhub_search_tickers",
-			Description: "Search for stock tickers by company name or symbol.",
-			Parameters: &genai.Schema{
-				Type: genai.TypeObject,
-				Properties: map[string]*genai.Schema{
-					"query": {Type: genai.TypeString, Description: "Company name or ticker symbol to search for."},
+	tools := []openai.Tool{
+		tool("finnhub_search_tickers", "Search for stock tickers by company name or symbol.", map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"query": map[string]any{
+					"type":        "string",
+					"description": "Company name or ticker symbol to search for.",
 				},
-				Required: []string{"query"},
 			},
-		},
-		{
-			Name:        "finnhub_get_quote",
-			Description: "Fetch the current stock price and intraday quote data.",
-			Parameters:  &genai.Schema{Type: genai.TypeObject, Properties: symbolParam, Required: []string{"symbol"}},
-		},
-		{
-			Name:        "finnhub_get_company_profile",
-			Description: "Fetch company profile: name, exchange, industry, market cap, IPO date, website.",
-			Parameters:  &genai.Schema{Type: genai.TypeObject, Properties: symbolParam, Required: []string{"symbol"}},
-		},
-		{
-			Name:        "finnhub_get_company_news",
-			Description: "Fetch the latest company news headlines (last 7 days, up to 5 articles).",
-			Parameters:  &genai.Schema{Type: genai.TypeObject, Properties: symbolParam, Required: []string{"symbol"}},
-		},
-		{
-			Name:        "finnhub_get_earnings_calendar",
-			Description: "Fetch upcoming or recent earnings dates and EPS/revenue estimates for a symbol (next 90 days).",
-			Parameters:  &genai.Schema{Type: genai.TypeObject, Properties: symbolParam, Required: []string{"symbol"}},
-		},
-		{
-			Name:        "finnhub_get_analyst_recommendations",
-			Description: "Fetch the latest analyst buy/hold/sell recommendation consensus.",
-			Parameters:  &genai.Schema{Type: genai.TypeObject, Properties: symbolParam, Required: []string{"symbol"}},
-		},
-		{
-			Name:        "finnhub_get_insider_sentiment",
-			Description: "Fetch insider trading sentiment (MSPR score and net share change) for the last 3 months.",
-			Parameters:  &genai.Schema{Type: genai.TypeObject, Properties: symbolParam, Required: []string{"symbol"}},
-		},
-		{
-			Name:        "finnhub_get_price_target",
-			Description: "Fetch analyst consensus price target: high, low, mean, and median.",
-			Parameters:  &genai.Schema{Type: genai.TypeObject, Properties: symbolParam, Required: []string{"symbol"}},
-		},
+			"required": []string{"query"},
+		}),
+		tool("finnhub_get_quote", "Fetch the current stock price and intraday quote data.", symbolParams()),
+		tool("finnhub_get_company_profile", "Fetch company profile: name, exchange, industry, market cap, IPO date, website.", symbolParams()),
+		tool("finnhub_get_company_news", "Fetch the latest company news headlines (last 7 days, up to 5 articles).", symbolParams()),
+		tool("finnhub_get_earnings_calendar", "Fetch upcoming or recent earnings dates and EPS/revenue estimates for a symbol (next 90 days).", symbolParams()),
+		tool("finnhub_get_analyst_recommendations", "Fetch the latest analyst buy/hold/sell recommendation consensus.", symbolParams()),
+		tool("finnhub_get_insider_sentiment", "Fetch insider trading sentiment (MSPR score and net share change) for the last 3 months.", symbolParams()),
+		tool("finnhub_get_price_target", "Fetch analyst consensus price target: high, low, mean, and median.", symbolParams()),
 	}
 
 	executors := map[string]ToolExecutor{
-		"finnhub_search_tickers":             executeFinnhubSearchTickers,
-		"finnhub_get_quote":                  executeFinnhubGetQuote,
-		"finnhub_get_company_profile":        executeFinnhubGetCompanyProfile,
-		"finnhub_get_company_news":           executeFinnhubGetCompanyNews,
-		"finnhub_get_earnings_calendar":      executeFinnhubGetEarningsCalendar,
+		"finnhub_search_tickers":              executeFinnhubSearchTickers,
+		"finnhub_get_quote":                   executeFinnhubGetQuote,
+		"finnhub_get_company_profile":         executeFinnhubGetCompanyProfile,
+		"finnhub_get_company_news":            executeFinnhubGetCompanyNews,
+		"finnhub_get_earnings_calendar":       executeFinnhubGetEarningsCalendar,
 		"finnhub_get_analyst_recommendations": executeFinnhubGetAnalystRecommendations,
-		"finnhub_get_insider_sentiment":      executeFinnhubGetInsiderSentiment,
-		"finnhub_get_price_target":           executeFinnhubGetPriceTarget,
+		"finnhub_get_insider_sentiment":       executeFinnhubGetInsiderSentiment,
+		"finnhub_get_price_target":            executeFinnhubGetPriceTarget,
 	}
 
-	return decls, executors
+	return tools, executors
 }
 
 // --- Executors ---

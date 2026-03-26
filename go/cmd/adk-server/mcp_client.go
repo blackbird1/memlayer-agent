@@ -12,7 +12,7 @@ import (
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
-	"google.golang.org/genai"
+	openai "github.com/sashabaranov/go-openai"
 )
 
 type MCPSettings struct {
@@ -221,8 +221,8 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func (m *MCPServerManager) ListAllTools(ctx context.Context) ([]*genai.FunctionDeclaration, map[string]ToolExecutor, error) {
-	var allDecls []*genai.FunctionDeclaration
+func (m *MCPServerManager) ListAllTools(ctx context.Context) ([]openai.Tool, map[string]ToolExecutor, error) {
+	var tools []openai.Tool
 	allExecutors := make(map[string]ToolExecutor)
 
 	for name, mcpClient := range m.clients {
@@ -233,17 +233,24 @@ func (m *MCPServerManager) ListAllTools(ctx context.Context) ([]*genai.FunctionD
 		}
 
 		for _, tool := range resp.Tools {
-			decl := &genai.FunctionDeclaration{
-				Name:        tool.Name,
-				Description: tool.Description,
-				Parameters:  convertMCPArgumentsToGenaiSchema(tool.InputSchema),
+			params := map[string]any{
+				"type":       tool.InputSchema.Type,
+				"properties": tool.InputSchema.Properties,
+				"required":   tool.InputSchema.Required,
 			}
-			allDecls = append(allDecls, decl)
+			tools = append(tools, openai.Tool{
+				Type: openai.ToolTypeFunction,
+				Function: &openai.FunctionDefinition{
+					Name:        tool.Name,
+					Description: tool.Description,
+					Parameters:  params,
+				},
+			})
 			allExecutors[tool.Name] = m.makeExecutor(mcpClient, tool.Name)
 		}
 	}
 
-	return allDecls, allExecutors, nil
+	return tools, allExecutors, nil
 }
 
 func (m *MCPServerManager) makeExecutor(mcpClient *client.Client, toolName string) ToolExecutor {
@@ -279,73 +286,3 @@ func (m *MCPServerManager) makeExecutor(mcpClient *client.Client, toolName strin
 	}
 }
 
-func convertMCPArgumentsToGenaiSchema(schema mcp.ToolInputSchema) *genai.Schema {
-	res := &genai.Schema{
-		Type: mapMCPTypeToGenai(schema.Type),
-	}
-	if schema.Properties != nil {
-		res.Properties = make(map[string]*genai.Schema)
-		for k, v := range schema.Properties {
-			if propMap, ok := v.(map[string]any); ok {
-				res.Properties[k] = convertAnyToGenaiSchema(propMap)
-			}
-		}
-	}
-	res.Required = schema.Required
-	return res
-}
-
-func convertAnyToGenaiSchema(propMap map[string]any) *genai.Schema {
-	s := &genai.Schema{}
-	if t, ok := propMap["type"].(string); ok {
-		s.Type = mapMCPTypeToGenai(t)
-	}
-	if d, ok := propMap["description"].(string); ok {
-		s.Description = d
-	}
-	if s.Type == genai.TypeObject {
-		if props, ok := propMap["properties"].(map[string]any); ok {
-			s.Properties = make(map[string]*genai.Schema)
-			for k, v := range props {
-				if pm, ok := v.(map[string]any); ok {
-					s.Properties[k] = convertAnyToGenaiSchema(pm)
-				}
-			}
-		}
-		if req, ok := propMap["required"].([]any); ok {
-			for _, r := range req {
-				if rs, ok := r.(string); ok {
-					s.Required = append(s.Required, rs)
-				}
-			}
-		}
-	}
-	if s.Type == genai.TypeArray {
-		if items, ok := propMap["items"].(map[string]any); ok {
-			s.Items = convertAnyToGenaiSchema(items)
-		} else {
-			// Gemini API requires 'items' for type 'array'
-			s.Items = &genai.Schema{Type: genai.TypeString}
-		}
-	}
-	return s
-}
-
-func mapMCPTypeToGenai(mcpType string) genai.Type {
-	switch strings.ToLower(mcpType) {
-	case "string":
-		return genai.TypeString
-	case "number":
-		return genai.TypeNumber
-	case "integer":
-		return genai.TypeInteger
-	case "boolean":
-		return genai.TypeBoolean
-	case "array":
-		return genai.TypeArray
-	case "object":
-		return genai.TypeObject
-	default:
-		return genai.TypeUnspecified
-	}
-}
