@@ -8,7 +8,6 @@ import structlog
 from google import genai
 from google.genai import types as genai_types
 
-from .local_tools import TOOL_DECLARATIONS, TOOL_EXECUTORS
 from .mcp_client import MCPServerManager
 from .session import load_history, save_history
 
@@ -92,10 +91,14 @@ async def handle_chat(
     except Exception as exc:
         logger.error("Failed to list MCP tools", session_id=session_id, error=str(exc))
 
-    # Register local Finnhub tools
-    func_decls.extend(TOOL_DECLARATIONS)
-    tool_executors.update(TOOL_EXECUTORS)
-    logger.info("Local tools registered", session_id=session_id, count=len(TOOL_DECLARATIONS))
+    # Register Finnhub example tools when FINNHUB_API_KEY is set.
+    # See finnhub_tools.py for the implementation and as a pattern for adding
+    # your own local tool integrations.
+    if os.environ.get("FINNHUB_API_KEY"):
+        from .finnhub_tools import TOOL_DECLARATIONS as FINNHUB_DECLS, TOOL_EXECUTORS as FINNHUB_EXECUTORS
+        func_decls.extend(FINNHUB_DECLS)
+        tool_executors.update(FINNHUB_EXECUTORS)
+        logger.info("Finnhub example tools registered", session_id=session_id, count=len(FINNHUB_DECLS))
 
     config = genai_types.GenerateContentConfig(
         system_instruction=ASSISTANT_PROMPT,

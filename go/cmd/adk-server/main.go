@@ -210,17 +210,19 @@ func handleChat(ctx context.Context, sessionID, message, apiKey string) ([]ChatS
 		}
 	}
 
-	// Register local tools.
-	localDecls, localExecutors := buildLocalToolset()
-	if len(localDecls) > 0 {
-		funcDecls = append(funcDecls, localDecls...)
-		for name, executor := range localExecutors {
+	// Register Finnhub example tools when FINNHUB_API_KEY is set.
+	// See finnhub_tools.go for the implementation and as a pattern for adding
+	// your own local tool integrations.
+	if os.Getenv("FINNHUB_API_KEY") != "" {
+		finnhubDecls, finnhubExecutors := buildFinnhubToolset()
+		funcDecls = append(funcDecls, finnhubDecls...)
+		for name, executor := range finnhubExecutors {
 			toolExecutors[name] = executor
 			if _, exists := toolDisplayNames[name]; !exists {
 				toolDisplayNames[name] = name
 			}
 		}
-		logger.Info("Local tools registered", "sessionId", sessionID, "count", len(localDecls))
+		logger.Info("Finnhub example tools registered", "sessionId", sessionID, "count", len(finnhubDecls))
 	}
 
 	// Attach tool declarations to model config so function-calling is enabled.
