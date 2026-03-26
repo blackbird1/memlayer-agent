@@ -1,155 +1,102 @@
-# Go Implementation: Autonomize Interview ADK Wrapper
+# Go Implementation
 
-Local ADK-style chat stack with:
-- Go API server (`adk-server`) on `:9090`
-- Redis session/history store on `:6379`
-- Nginx web UI (`adk-web`) on `:8080` with `/api/*` proxy to `adk-server`
-
-Run the setup and build commands from this `go/` directory.
-
-## Setup Pattern
-
-Use this exact flow every time:
-1. Prepare env file and secrets.
-2. Start services (Docker recommended, local also supported).
-3. Run smoke checks (API + UI).
-4. Validate optional MCP integrations.
-5. Troubleshoot from logs if checks fail.
+Go API server (`adk-server`) for the MemLayer Agent demo.
 
 ## Prerequisites
 
-Docker path:
-- Docker Engine
-- Docker Compose v2
+- Go 1.22+ (for local dev without Docker)
+- Redis 7+ (or Docker)
+- A `.env` file at the repo root (see [`.env.example`](../.env.example))
 
-Local path (without Docker for server process):
-- Go `1.25.5` (matches [`go.mod`](./go.mod))
-- Redis `7+` reachable at `REDIS_ADDR` (default `localhost:6379`)
-
-External credentials:
-- Required: one of `GOOGLE_API_KEY` or `GEMINI_API_KEY`
-- Optional: `MEMLAYER_MCP_BEARER_TOKEN` for MemLayer MCP over HTTP
-
-## Step 1: Configure Environment
-
-Create a local env file and point `.env` at it:
+## Step 1: Configure environment
 
 ```bash
-cp ../.env.example .env.local
-ln -sf .env.local .env
+cp ../.env.example ../.env
+# fill in GOOGLE_API_KEY (or OPENAI_API_KEY) and MEMLAYER_MCP_BEARER_TOKEN
 ```
 
-Fill `.env.local`:
+## Step 2A: Run with Docker (recommended)
+
+From the repo root:
 
 ```bash
-# Required (set one)
-GOOGLE_API_KEY=your_google_or_gemini_key
-# GEMINI_API_KEY=your_google_or_gemini_key
-
-# Local server default (Docker compose overrides for adk-server)
-REDIS_ADDR=localhost:6379
-
-# Optional MemLayer MCP integration
-MEMLAYER_MCP_BEARER_TOKEN=your_memlayer_mcp_bearer_token
+docker compose --profile go up --build
 ```
 
-If you configure MemLayer MCP in a settings file, the server also accepts a `bearerToken` or `bearer_token` field and converts it into an `Authorization: Bearer ...` header. An explicit `headers.Authorization` entry still wins if you prefer to set the header directly.
+Services:
+- `adk-web` — chat UI at `http://localhost:8080`
+- `adk-server` — API server at `http://localhost:9090`
+- `adk-redis` — session store at `localhost:6379`
 
-## Step 2A: Start with Docker (Recommended)
+## Step 2B: Run locally
 
-Build and run all services:
-
-```bash
-docker compose up --build
-```
-
-Expected services:
-- `adk-web` on `http://localhost:8080`
-- `adk-server` on `http://localhost:9090`
-- `adk-redis` on `localhost:6379`
-
-Check status:
-
-```bash
-docker compose ps
-```
-
-Stop stack:
-
-```bash
-docker compose down
-```
-
-## Step 2B: Start Server Locally (Alternative)
-
-Use this when you want to run Go directly.
-
-Download dependencies:
-
-```bash
-go mod download
-```
-
-Start Redis (example):
+Start Redis (if not already running):
 
 ```bash
 docker run --rm -p 6379:6379 redis:7-alpine
 ```
 
-Start API server:
+Run the server (from the repo root):
 
 ```bash
-go run ./cmd/adk-server
+go run ./go/cmd/adk-server
 ```
 
-Expected startup behavior:
-- Logs include MCP connection and tool registration details.
-- Server starts listening on port `9090`.
+Server starts on `:9090` by default.
 
-For UI in local mode:
-- Either run Docker Compose just for web/proxy, or
-- Serve static UI yourself using [`web/index.html`](../web/index.html) and proxy rules in [`web/nginx.conf`](../web/nginx.conf)
-
-## Step 3: Smoke Test
-
-API smoke test:
+## Step 3: Smoke test
 
 ```bash
 curl -sS -X POST http://localhost:9090/api/chat \
   -H "Content-Type: application/json" \
-  -d '{"message":"What is Stephen working on?","sessionId":"smoke-test"}'
+  -d '{"message":"hello","sessionId":"smoke-test"}'
 ```
 
-Expected result:
-- JSON response with at least `response` or `error`
-- If tools are configured, `steps` may include tool call/result entries
+Expected: JSON with a `response` field and no `error`.
 
-UI smoke test:
-1. Open `http://localhost:8080`
-2. Send a test message
-3. Confirm response is rendered and no proxy/network error appears in browser devtools
+## LLM provider
 
-## Step 4: Validate Integrations (Optional)
+The server auto-detects the provider from environment variables:
 
-MemLayer MCP:
-- Confirm `MEMLAYER_MCP_BEARER_TOKEN` is set if your MCP server requires bearer auth
-- Run a chat prompt that should trigger a MemLayer MCP tool
+| Env var | Provider | Default model |
+|---------|----------|---------------|
+| `GOOGLE_API_KEY` | Gemini (via OpenAI-compatible endpoint) | `gemini-2.0-flash` |
+| `OPENAI_API_KEY` | OpenAI | `gpt-4o-mini` |
+| `OPENAI_API_KEY` + `OPENAI_BASE_URL` | Any OpenAI-compatible (Ollama, Groq, etc.) | set via `MODEL` |
+
+Override the model with `MODEL=<model-id>`.
+
+## MCP configuration
+
+By default the server reads `MCP_URL` from the environment and connects over Streamable HTTP.
+
+For multi-server or stdio setups, create a `mcp_settings.json` (or `.mcp_settings.json`) at the working directory:
+
+```json
+{
+  "mcpServers": {
+    "memlayer": {
+      "url": "https://your-mcp-host/mcp",
+      "bearerToken": "your_token"
+    },
+    "local-tool": {
+      "command": "npx",
+      "args": ["-y", "@some/mcp-server"]
+    }
+  }
+}
+```
+
+The server also checks `.gemini/settings.json` for compatibility with the Gemini CLI.
 
 ## Troubleshooting
 
-`GEMINI_API_KEY or GOOGLE_API_KEY is required`
-- Cause: neither API key is set.
-- Fix: set one key in `.env.local`, then restart server/container.
+**`OPENAI_API_KEY or GOOGLE_API_KEY is required`**
+- Set `GOOGLE_API_KEY` (or `OPENAI_API_KEY`) in `.env` and restart.
 
-`Failed to connect to Redis`
-- Cause: Redis not running or unreachable address.
-- Fix: verify Redis is up and `REDIS_ADDR` is correct.
-- Note: in Docker Compose, `adk-server` uses `REDIS_ADDR=redis:6379`.
+**`Failed to connect to Redis`**
+- Verify Redis is running: `redis-cli ping`
+- Check `REDIS_ADDR` matches where Redis is listening.
 
-UI loads but chat fails
-- Cause: API/proxy issue.
-- Fix: inspect `adk-server` logs and confirm nginx `/api/` proxy target is `adk-server:9090` in Docker network.
-
-Port conflict on `8080`, `9090`, or `6379`
-- Cause: local process already bound to required port.
-- Fix: stop conflicting process or remap port(s) in [`docker-compose.yml`](./docker-compose.yml).
+**Port conflict on `8080`, `9090`, or `6379`**
+- Stop the conflicting process or remap ports in `docker-compose.yml`.

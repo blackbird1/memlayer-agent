@@ -28,7 +28,7 @@ User message
 ┌─────────────────────────────────────────────────────┐
 │                     LOG                             │
 │  prociq_log_episode(task_goal, approach, outcome)   │
-│  → stored in ProcIQ, available in future sessions   │
+│  → stored in MemLayer, available in future sessions │
 └──────────────────────────┬──────────────────────────┘
                            │
                            ▼
@@ -51,8 +51,8 @@ Browser / curl
      ├─ Load chat history from Redis (keyed by sessionId)
      │
      ├─ Register tools:
-     │    ├─ ProcIQ MCP tools  (always — memory layer)
-     │    └─ Local tools       (if env key present, e.g. FINNHUB_API_KEY)
+     │    ├─ MemLayer MCP tools  (always — memory layer)
+     │    └─ Local tools         (if env key present, e.g. FINNHUB_API_KEY)
      │
      ├─ Send message + history → LLM (OpenAI protocol)
      │
@@ -70,13 +70,13 @@ Browser / curl
 | Component | Role |
 |-----------|------|
 | **LLM** | Language model via OpenAI protocol — Gemini (default), OpenAI, Ollama, or any compatible provider |
-| **ProcIQ MCP** | Memory layer — stores and retrieves episodes, notes, patterns, skills |
+| **MemLayer MCP** | Memory layer — stores and retrieves episodes, notes, patterns, skills |
 | **Redis** | Short-term session store — chat history per `sessionId` (30-min TTL) |
 | **Nginx** | Reverse proxy — serves the static UI and routes `/api/*` to the backend |
 
 ## Two kinds of tools
 
-### MCP tools (remote, via ProcIQ)
+### MCP tools (remote, via MemLayer)
 
 Connected at startup over Streamable HTTP. These are the memory tools:
 
@@ -91,7 +91,7 @@ The agent is instructed to treat retrieved Skills and Patterns as **mandatory pr
 
 Implemented directly in the server binary. Loaded only when a relevant environment variable is set. The Finnhub integration (`finnhub_tools.go` / `finnhub_tools.py`) is the reference example — it shows the full pattern:
 
-1. Define `FunctionDeclaration` schemas (what the model sees)
+1. Define tool schemas (what the model sees)
 2. Implement executor functions (what actually runs)
 3. Export a registry and register it behind an env var check
 
@@ -99,7 +99,7 @@ See [`CONTRIBUTING.md`](../CONTRIBUTING.md) for how to add your own.
 
 ## Memory types
 
-ProcIQ stores several kinds of memory:
+MemLayer stores several kinds of memory:
 
 | Type | What it is | Example |
 |------|-----------|---------|
@@ -112,11 +112,11 @@ Episodes accumulate automatically as the agent works. Patterns and skills are pr
 
 ## Session vs. long-term memory
 
-| | Redis (session) | ProcIQ (long-term) |
+| | Redis (session) | MemLayer (long-term) |
 |---|---|---|
 | **Scope** | One conversation | Across all conversations |
 | **Content** | Full message history | Distilled knowledge |
 | **TTL** | 30 minutes | Indefinite |
 | **Purpose** | Keep conversation coherent | Accumulate expertise |
 
-Redis lets the agent remember what was said earlier in the same chat. ProcIQ lets it remember what was learned across many different sessions.
+Redis lets the agent remember what was said earlier in the same chat. MemLayer lets it remember what was learned across many different sessions.

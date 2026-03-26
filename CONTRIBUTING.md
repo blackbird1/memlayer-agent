@@ -1,6 +1,6 @@
 # Contributing to MemLayer Agent
 
-Thanks for your interest in contributing! This project is a showcase for [ProcIQ](https://prociq.ai) persistent memory — we welcome bug fixes, new tools, documentation improvements, and backend enhancements.
+Thanks for your interest in contributing! This project is a showcase for [MemLayer](https://prociq.ai) — persistent memory by ProcIQ. We welcome bug fixes, new tools, documentation improvements, and backend enhancements.
 
 ## Prerequisites
 

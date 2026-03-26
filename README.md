@@ -1,25 +1,25 @@
 # MemLayer Agent
 
-A self-learning AI agent demo built on Google Gemini with persistent memory via [ProcIQ](https://prociq.ai). The agent follows a **Retrieve → Act → Log** memory cycle, accumulating knowledge across sessions and using it to inform future responses.
+A self-learning AI agent demo showcasing [MemLayer](https://prociq.ai) — persistent memory by ProcIQ. The agent follows a **Retrieve → Act → Log** memory cycle, accumulating knowledge across sessions and using it to inform future responses.
 
 ## What it does
 
 - **Chat interface** — web UI for conversational interaction with the agent
-- **Persistent memory** — integrates with ProcIQ's MCP server to retrieve past context before acting and log outcomes after, so the agent learns over time
+- **Persistent memory** — integrates with MemLayer's MCP server to retrieve past context before acting and log outcomes after, so the agent learns over time
 - **Example tool integration** — Finnhub stock market tools (quotes, news, earnings, analyst data) included as a reference implementation; enabled automatically when `FINNHUB_API_KEY` is set
-- **Configurable model** — swap Gemini models via `MODEL` env var (Flash, Pro, Deep Think)
+- **Any LLM provider** — works with Gemini, OpenAI, Ollama, or any OpenAI-compatible endpoint via `OPENAI_BASE_URL`
 - **MCP tool support** — connects to any MCP server for additional tool sets
 
 ## Stack
 
 | Component | Role |
 |-----------|------|
-| Go (`adk-server`) | API server, Gemini client, tool orchestration (default) |
+| Go (`adk-server`) | API server, LLM client, tool orchestration (default) |
 | Python (`adk-server-python`) | Python implementation of the same API server |
 | Redis | Chat session / history store |
 | Nginx (`adk-web`) | Static UI + `/api/*` reverse proxy |
-| Gemini API | LLM (default: `gemini-3-flash-preview`) |
-| ProcIQ MCP | Persistent memory (episodes, notes, patterns) |
+| LLM | Any OpenAI-compatible provider (default: Gemini) |
+| MemLayer MCP | Persistent memory (episodes, notes, patterns, skills) |
 | Finnhub API | Example tool integration (optional) — live stock market data |
 
 ## Quick start
@@ -50,7 +50,7 @@ See [`go/README.md`](./go/README.md) or [`python/README.md`](./python/README.md)
 
 ## How it works
 
-The agent follows a **Retrieve → Act → Log** memory cycle powered by ProcIQ:
+The agent follows a **Retrieve → Act → Log** memory cycle powered by MemLayer:
 
 1. **Retrieve** — before acting, fetch relevant past episodes, patterns, and skills
 2. **Act** — perform the task informed by retrieved context; on error, log and retrieve a known fix before retrying
