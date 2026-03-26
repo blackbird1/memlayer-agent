@@ -1,7 +1,7 @@
 FROM nginx:alpine
 
 # Copy custom nginx config
-COPY web/nginx.conf /etc/nginx/conf.d/default.conf
+COPY web/nginx.conf /etc/nginx/templates/default.conf.template
 
 # Copy static files
 COPY web/index.html /usr/share/nginx/html/index.html

@@ -17,6 +17,7 @@ services:
       dockerfile: Dockerfile.go
     container_name: adk-server
     restart: unless-stopped
+    profiles: [go]
     env_file:
       - .env
     environment:
@@ -29,13 +30,35 @@ services:
       redis:
         condition: service_healthy
 
+  adk-server-python:
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+    container_name: adk-server-python
+    restart: unless-stopped
+    profiles: [python]
+    env_file:
+      - .env
+    environment:
+      REDIS_ADDR: redis:6379
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "9091:9090"
+    depends_on:
+      redis:
+        condition: service_healthy
+
   adk-web:
     build:
       context: .
       dockerfile: Dockerfile.web
     container_name: adk-web
     restart: unless-stopped
+    environment:
+      API_BACKEND: ${API_BACKEND:-adk-server:9090}
     ports:
       - "8080:8080"
     depends_on:
-      - adk-server
+      redis:
+        condition: service_healthy
